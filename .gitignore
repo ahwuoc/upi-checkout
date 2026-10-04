@@ -1,0 +1,32 @@
+# ---- BÍ MẬT / dữ liệu runtime — TUYỆT ĐỐI không commit ----
+proxy.txt
+proxy.txt.bak-*
+proxy_seeds*.txt
+proxy_in*.txt
+proxy_state*.json
+proxy_state*.old.json
+removed_proxies.jsonl
+at.txt
+tokens*.txt
+tokens.json
+pool_*.json
+cli_results.json
+run_state/
+logs/
+cs_state/
+dumps/
+.cache/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# ---- Editor / OS / misc ----
+.DS_Store
+.idea/
+.vscode/
+*.log

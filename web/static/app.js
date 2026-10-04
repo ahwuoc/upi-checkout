@@ -1,0 +1,2280 @@
+'use strict';
+
+/* =====================================================================
+ * UPI Checkout dashboard — plain JS, no framework, no build step.
+ * Tasks live in a Map keyed by task_id; rows are created once and then
+ * updated in place so a 200-task job stays responsive.
+ * ===================================================================== */
+
+/* ------------------------------ state ------------------------------ */
+
+const state = {
+  jobId: null,
+  total: 0,
+  mode: 'auto',
+  view: 'list',
+  running: false,
+  stopping: false,
+  starting: false, // đang POST /api/run (kể cả lúc server quét/lọc proxy) — chưa có job
+  startingAt: 0,
+  filter: 'all', // tab đang chọn: all | running | queued | success | fail
+  tokens: [], // token order for matching each task result to its account
+  es: null, // active EventSource, if any
+};
+
+// task_id -> task object. This is the single source of truth for tasks.
+const tasks = new Map();
+
+const MODE_HINTS = {
+  auto: 'Detect each account\'s provider, then run the matching flow.',
+  oaics: 'confirmation_tokens → checkout/confirm → intent confirm.',
+  cs: 'payment_pages + approve (extract_cs).',
+};
+
+// Backend gửi 2 loại status khác nhau:
+//   - task status (snapshot + task_done): pending | running | done | fail | stopped
+//   - raw status của luồng (task_done.status / snapshot.raw_status): LINK | FAIL |
+//     TIMEOUT | error | no_promo | taxes_fail | ct_fail | ...
+// CHỈ 'LINK' là thành công (có link/QR để quét). Mọi raw status khác đều là thất bại.
+// Trần token mỗi batch — phải khớp MAX_TOKENS_PER_BATCH bên web/engine.py.
+const MAX_TOKENS = 1000;
+// Trần worker — phải khớp `le=64` trong web/app.py (server là nơi phán cuối).
+// Ngưỡng cảnh báo RAM: mỗi task là 1 subprocess extract_cs ~70 MB.
+const MAX_WORKERS = 64;
+const RAM_WARN_WORKERS = 40;
+
+// Số nhiều tiếng Anh: 1 task / 2 tasks. Dùng cho mọi chuỗi có đếm.
+function plural(n) { return n === 1 ? '' : 's'; }
+
+const QUEUE_FILTERS = [
+  { key: 'all', label: 'All' },
+  { key: 'running', label: 'Running' },
+  { key: 'queued', label: 'Queued' },
+  { key: 'success', label: 'Success' },
+  { key: 'fail', label: 'Failed' },
+  { key: 'stopped', label: 'Stopped' },
+];
+
+// Inline SVG icons for step states (no icon library, works offline).
+const STEP_ICONS = {
+  pending: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/></svg>',
+  active: '<svg class="spin" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2.5" stroke-dasharray="42 16" stroke-linecap="round"/></svg>',
+  done: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="11" fill="#22c55e"/><path d="M7 12.5l3 3 7-7" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  fail: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="11" fill="#ef4444"/><path d="M9 9l6 6M15 9l-6 6" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>',
+  skip: '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2" stroke-dasharray="4 4"/></svg>',
+};
+
+/* --------------------------- DOM handles --------------------------- */
+
+const els = {
+  jobIdInput: document.getElementById('job-id-input'),
+  jobIdLoad: document.getElementById('job-id-load'),
+  jobIdList: document.getElementById('job-id-list'),
+  statRunning: document.getElementById('stat-running'),
+  statQueued: document.getElementById('stat-queued'),
+  statSuccess: document.getElementById('stat-success'),
+  statFail: document.getElementById('stat-fail'),
+  statStopped: document.getElementById('stat-stopped'),
+  overallCount: document.getElementById('overall-count'),
+  btnSuccess: document.getElementById('btn-success'),
+  btnRefresh: document.getElementById('btn-refresh'),
+  btnClearTab: document.getElementById('btn-clear-tab'),
+  btnClearTabLabel: document.getElementById('btn-clear-tab-label'),
+  btnNotify: document.getElementById('btn-notify'),
+  btnNotifyLabel: document.getElementById('btn-notify-label'),
+  notifyAudio: document.getElementById('notify-audio'),
+  modal: document.getElementById('modal'),
+  modalTitle: document.getElementById('modal-title'),
+  modalText: document.getElementById('modal-text'),
+  modalOk: document.getElementById('modal-ok'),
+  modalCancel: document.getElementById('modal-cancel'),
+  listEmpty: document.getElementById('list-empty'),
+  queueLoading: document.getElementById('queue-loading'),
+  queueLoadingText: document.getElementById('queue-loading-text'),
+  queueLoadingFill: document.getElementById('queue-loading-fill'),
+  tabCounts: {
+    all: document.getElementById('c-all'),
+    running: document.getElementById('c-running'),
+    queued: document.getElementById('c-queued'),
+    success: document.getElementById('c-success'),
+    fail: document.getElementById('c-fail'),
+    stopped: document.getElementById('c-stopped'),
+  },
+  overallBar: document.getElementById('overall-bar'),
+  overallFill: document.getElementById('overall-fill'),
+  overallPct: document.getElementById('overall-pct'),
+  tokens: document.getElementById('tokens'),
+  tokenCount: document.getElementById('token-count'),
+  modeHint: document.getElementById('mode-hint'),
+  useProxy: document.getElementById('use-proxy'),
+  proxies: document.getElementById('proxies'),
+  poolStatus: document.getElementById('pool-status'),
+  poolCount: document.getElementById('pool-count'),
+  poolClear: document.getElementById('pool-clear'),
+  poolScan: document.getElementById('pool-scan'),
+  useFilter: document.getElementById('use-filter'),
+  minScore: document.getElementById('min-score'),
+  scanResult: document.getElementById('scan-result'),
+  country: document.getElementById('country'),
+  promo: document.getElementById('promo'),
+  workers: document.getElementById('workers'),
+  retries: document.getElementById('retries'),
+  summaryTasks: document.getElementById('summary-tasks'),
+  summaryTotal: document.getElementById('summary-total'),
+  warning: document.getElementById('warning'),
+  submit: document.getElementById('submit'),
+  historyBox: document.getElementById('history-box'),
+  historyList: document.getElementById('history-list'),
+  historyCount: document.getElementById('history-count'),
+  emptyState: document.getElementById('empty-state'),
+  taskList: document.getElementById('task-list'),
+  toasts: document.getElementById('toasts'),
+};
+
+/* ---------------------------- helpers ------------------------------ */
+
+// Escape untrusted text for safe insertion into innerHTML (covers attribute context too).
+function esc(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Only allow http(s) URLs in href/src to block javascript: etc.
+function safeUrl(u) {
+  if (typeof u !== 'string') return '#';
+  const v = u.trim();
+  return /^https?:\/\//i.test(v) ? v : '#';
+}
+
+function fmtDuration(ms) {
+  if (ms == null || isNaN(ms) || ms < 0) return '—';
+  const totalSec = Math.round(ms / 1000);
+  if (totalSec < 60) return totalSec + 's';
+  return Math.floor(totalSec / 60) + 'm ' + (totalSec % 60) + 's';
+}
+
+function fmtAmount(minor) {
+  if (minor == null || isNaN(minor)) return null;
+  const major = minor / 100;
+  return '₹' + major.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/* --------------------------- task model ---------------------------- */
+
+function newTask(taskId) {
+  return {
+    task_id: taskId,
+    index: 0,
+    email: '',
+    token: '',
+    flow: null,
+    flow_label: null,
+    steps: [],              // [{key,label,status,detail,err}]
+    status: 'pending',      // pending | running | success | fail
+    rawStatus: null,        // raw backend terminal status (LINK/FAIL/...)
+    error: null,
+    duration_ms: null,
+    run: 1,
+    egress: null,           // {ip, location, probed_at}
+    artifact: null,         // {upi_link, qr_png, qr_svg, amount_minor, intent}
+    doneAt: 0,              // epoch lúc task xong (server gửi) -> sắp tab Success
+    created_at: null,
+    updated_at: null,
+    logs: [],
+    el: null,               // cached DOM refs
+    expanded: false,
+  };
+}
+
+function normalizeStatus(taskStatus, rawStatus) {
+  const ts = String(taskStatus || '').toLowerCase();
+  const rs = String(rawStatus || '').trim().toUpperCase();
+  if (ts === 'running') return 'running';
+  if (rs === 'LINK') return 'success';
+  // Dừng theo yêu cầu KHÔNG phải thất bại. Task bị kill giữa chừng (raw STOPPED)
+  // và task chưa hề chạy (status stopped) đều là "đã dừng". Trước đây gộp cả vào
+  // 'fail' nên 92 task chưa chạy bị tô đỏ "Thất bại" — nhìn như 92 account lỗi.
+  if (ts === 'stopped' || rs === 'STOPPED') return 'stopped';
+  // done/fail la trang thai task da ket thuc
+  if (ts === 'done' || ts === 'fail') return 'fail';
+  // co raw status nhung khong phai LINK -> luong da chay va that bai
+  if (rs) return 'fail';
+  return 'pending';
+}
+
+// Done-or-failed steps / total steps.
+function taskProgress(t) {
+  if (!t.steps || !t.steps.length) return 0;
+  let finished = 0;
+  for (const s of t.steps) {
+    if (s.status === 'done' || s.status === 'fail') finished++;
+  }
+  return Math.round((finished / t.steps.length) * 100);
+}
+
+// Ly do that bai: err that -> rawStatus -> dong log cuoi -> "(không có thông tin)".
+// Backend co the tra ve error rong, nen phai co fallback de khong hien task fail tron khong.
+function failReason(t) {
+  if (t.error) return t.error;
+  if (t.rawStatus && t.rawStatus !== 'UNKNOWN') return t.rawStatus;
+  const logs = t.logs || [];
+  const lastLog = [...logs].reverse().find(l => l && l.trim());
+  if (lastLog) return 'no error detail | last log: ' + lastLog.trim().slice(0, 160);
+  return t.rawStatus ? t.rawStatus + ' (no detail)' : 'no info';
+}
+
+// AT 的 JWT 有 1~2 KB，整条铺在卡片里没法看。只留首尾做识别。
+function maskToken(token) {
+  const t = String(token || '');
+  if (!t) return '—';
+  if (t.length <= 26) return t;
+  return t.slice(0, 12) + '…' + t.slice(-8) + '  (' + t.length + ')';
+}
+
+// Xoá task của một tab. Ưu tiên xoá ở server trước —— 只删 DOM 的话，
+// F5 一下整批又回来了，比没有这个按钮更让人困惑。
+async function clearTab(scope, btn) {
+  const label = (QUEUE_FILTERS.find(f => f.key === scope) || {}).label || scope;
+  const c = countByStatus();
+  const n = scope === 'all' ? tasks.size : (c[scope] || 0);
+  if (!n) { toast('Tab ' + label + ' is empty'); return; }
+  const okClear = await confirmDialog({
+    title: 'Delete ' + n + ' task' + plural(n) + ' from "' + label + '"?',
+    text: 'Also deletes the server copy.\nThis cannot be undone.',
+    okLabel: 'Delete ' + n + ' task' + plural(n),
+  });
+  if (!okClear) return;
+
+  if (btn) btn.classList.add('busy');
+  try {
+    if (state.jobId) {
+      const res = await fetch('/api/clear/' + state.jobId, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { toast(data.detail || 'Delete failed'); return; }
+    }
+    // 服务端删完再删本地，避免中间态
+    for (const [tid, t] of [...tasks.entries()]) {
+      const bucket = t.status === 'running' ? 'running'
+                   : t.status === 'success' ? 'success'
+                   : t.status === 'fail' ? 'fail'
+                   : t.status === 'stopped' ? 'stopped' : 'queued';
+      if (scope === 'all' || bucket === scope) {
+        if (t.el && t.el.wrap) t.el.wrap.remove();
+        if (t._monitor) { clearInterval(t._monitor); t._monitor = null; }
+        tasks.delete(tid);
+      }
+    }
+    updateCounters();
+    toast('Deleted ' + n + ' task' + plural(n) + ' from ' + label);
+  } catch (err) {
+    toast('Delete error: ' + err.message);
+  } finally {
+    if (btn) btn.classList.remove('busy');
+  }
+}
+
+function rowStatusText(t) {
+  // 停止期间要让用户看见「停止真的在做事情」。以前只把按钮变灰，
+  // 任务行照旧写着「Đang chạy…」，看着就像没反应。
+  // 现在 engine 会真的 kill 掉子进程，通常 1~2 秒内这些行就会翻成 Fail。
+  if (state.stopping) {
+    if (t.status === 'running') return '⏹ Cancelling…';
+    if (t.status === 'pending') return '⏹ Will be cancelled';
+  }
+  if (t.status === 'stopped') {
+    // Phân biệt rõ: bị kill giữa chừng (token đã dùng một phần) vs chưa hề chạy
+    // (token còn nguyên, chạy lại được) — trước đây cả hai đều ghi "Fail".
+    const raw = String(t.rawStatus || '').toUpperCase();
+    return raw === 'STOPPED'
+      ? 'Stopped mid-run — token may be partially used'
+      : 'Never ran — job stopped before its turn (token intact)';
+  }
+  if (t.status === 'success') return 'QR link created';
+  if (t.status === 'fail') return 'Fail: ' + failReason(t);
+  if (t.status === 'running') return 'Running…';
+  // Vị trí trong queue = số thứ tự dòng token, để biết task này là token thứ mấy
+  // trong 100 dòng đã dán (trước đây chỉ ghi "Chờ xử lý", không biết đang ở đâu).
+  const total = state.total || tasks.size;
+  if (total > 0 && t.index != null) return 'Queued · ' + (t.index + 1) + '/' + total;
+  return 'Waiting';
+}
+
+// Chip nói kết quả **thật** của link, không phải "máy đã trích xuất xong".
+// Trích xuất xong mới chỉ là có link QR; tiền/uỷ nhiệm chưa về thì không được
+// xanh — trước đây chip luôn xanh "Thành công" nên nhìn như đã thu được tiền,
+// trong khi thực tế khách chưa quét.
+const TERMINAL = ['succeeded', 'failed', 'canceled', 'expired'];
+
+// Trạng thái HIỆU DỤNG của link. Hai nguồn nói về cùng một link:
+//   • `t.linkState` — server dò ở nền (engine._link_monitor_loop) và đẩy xuống,
+//     còn nguyên trong snapshot sau F5;
+//   • `t.probe.status` — lần đọc trang instructions gần nhất của chính tab này.
+// Probe có thể CŨ HƠN server: request bắt đầu lúc khách chưa quét, trả về sau khi
+// server đã thấy `succeeded` —apply nó là kéo card về "đang chờ" (đúng bug 2 card
+// augers.fonder / clinger_alpacas hiện "expired" dù uỷ nhiệm đã thành công).
+// Nên: chỉ khi server đã kết luận CUỐI mà probe chưa, lấy server.
+function effStatus(t, p) {
+  p = p || t.probe || {};
+  const srv = t.linkState || '';
+  if (!TERMINAL.includes(p.status) && TERMINAL.includes(srv)) return srv;
+  return p.status || '';
+}
+
+function chipFor(t) {
+  if (t.status === 'running') return ['Running', 'chip-blue'];
+  if (t.status === 'stopped') return ['Stopped', 'chip-gray'];
+  if (t.status === 'fail') return ['Failed', 'chip-red'];
+  if (t.status !== 'success') return ['Waiting', 'chip-gray'];
+  const p = t.probe || {};
+  const st = effStatus(t, p);
+  if (!p.ok && !st) return ['Awaiting payment', 'chip-amber'];   // chưa dò được -> vẫn coi là chưa xong
+  const byProbe = {
+    succeeded: ['Customer approved', 'chip-green'],
+    failed: ['Stripe declined', 'chip-red'],
+    canceled: ['Cancelled', 'chip-red'],
+    expired: ['Expired', 'chip-amber'],
+    waiting: ['Awaiting payment', 'chip-amber'],
+  };
+  return byProbe[st] || ['Awaiting payment', 'chip-amber'];
+}
+
+function setChip(t) {
+  if (!t.el) return;
+  const [label, cls] = chipFor(t);
+  if (t.el.chip) {
+    t.el.chip.textContent = label;
+    t.el.chip.className = 'chip ' + cls;
+  }
+  // chip trên card (chế độ lưới) giữ chữ "Link đã tạo" như cũ, chỉ đổi **màu**
+  // theo tình trạng link — chép y chữ của chip hàng thì 1 card có 2 chip giống hệt.
+  if (t.el.successCardStatus) {
+    t.el.successCardStatus.textContent = 'Link created';
+    t.el.successCardStatus.className = 'success-card-status chip ' + cls;
+  }
+}
+
+function chipHtml(t) {
+  const [label, cls] = chipFor(t);
+  return '<span class="chip ' + cls + '">' + label + '</span>';
+}
+
+function stepIcon(status) {
+  return STEP_ICONS[status] || STEP_ICONS.pending;
+}
+
+function stepHtml(s) {
+  const cls = 'step step-' + (s.status || 'pending');
+  const detailText = s.err || s.detail;
+  const detail = detailText ? '<div class="step-detail muted">' + esc(detailText) + '</div>' : '';
+  const label = s.status === 'skip'
+    ? '<div class="step-label muted strike">' + esc(s.label) + '</div>'
+    : '<div class="step-label">' + esc(s.label) + '</div>';
+  return '<div class="' + cls + '"><span class="step-icon">' + stepIcon(s.status) + '</span>' +
+    '<div class="step-text">' + label + detail + '</div></div>';
+}
+
+function flowBadgeHtml(t) {
+  if (t.flow === 'oaics') return '<span class="flow-badge flow-oaics">FLOW OAICS</span>';
+  if (t.flow === 'cs') return '<span class="flow-badge flow-cs">FLOW CS</span>';
+  if (t.status === 'running') return '<span class="flow-badge flow-detect">DETECTING FLOW</span>';
+  return '<span class="flow-badge flow-none">—</span>';
+}
+
+function flowCardHtml(t) {
+  let html =
+    '<div class="flow-card">' +
+      '<div class="flow-card-title">Backend flow</div>' +
+      '<div class="flow-badge-row"><span class="muted">Backend payment</span> ' + flowBadgeHtml(t) + '</div>';
+  if (t.egress) {
+    const e = t.egress;
+    const ex = e.exit || {};
+    const bl = e.billing || {};
+    html += '<div class="egress"><div class="egress-title muted">Proxy egress</div>';
+    if (ex.ip || e.ip) {
+      html += '<div class="egress-row"><span>Exit IP</span><span class="mono">' +
+              esc(ex.ip || e.ip || '') + (ex.country ? ' <span class="muted">(' + esc(ex.country) + ')</span>' : '') +
+              '</span></div>';
+      const loc = fmtGeo(ex) || e.location || '';
+      if (loc) html += '<div class="egress-row"><span>Exit location</span><span>' + esc(loc) + '</span></div>';
+    }
+    if (bl.ip) {
+      html += '<div class="egress-row"><span>Billing IP</span><span class="mono">' +
+              esc(bl.ip) + (e.billing_country ? ' <span class="muted">(' + esc(e.billing_country) + ')</span>' : '') +
+              (e.same_ip ? ' <span class="muted">— same exit</span>' : '') +
+              '</span></div>';
+      const bloc = fmtGeo(bl);
+      if (bloc) html += '<div class="egress-row"><span>Billing location</span><span>' + esc(bloc) + '</span></div>';
+    }
+    if (e.billing_geo && e.billing_geo.location) {
+      html += '<div class="egress-row"><span>Billing geo</span><span>' +
+              esc(e.billing_geo.location) + (e.billing_geo.approx ? ' <span class="muted">(approx)</span>' : '') +
+              '</span></div>';
+    }
+    if (e.probed_at) {
+      html += '<div class="egress-row"><span>Probed at</span><span class="mono">' + esc(e.probed_at) + '</span></div>';
+    }
+    html += '</div>';
+  }
+  return html + '</div>';
+}
+
+function artifactHtml(t) {
+  const a = t.artifact;
+  if (!a) return '';
+  let html = '<div class="artifact"><div class="artifact-title">UPI artifact</div>';
+  if (a.upi_link) {
+    html += '<a class="upi-link mono" href="' + esc(safeUrl(a.upi_link)) + '" target="_blank" rel="noopener noreferrer" title="' + esc(a.upi_link) + '">' + esc(a.upi_link) + '</a>';
+  }
+  if (a.amount_minor != null) {
+    // Ghi rõ đây là số CHỐT LÚC TRÍCH XUẤT — card ở trên hiện số LIVE của trang
+    // Stripe, hai số có thể khác nhau (ví dụ promo áp được ở lần chạy sau).
+    html += '<div class="amount" title="Amount recorded when this link was extracted">'
+      + esc(fmtAmount(a.amount_minor)) + '</div>';
+  }
+  // QR là ảnh dùng-một-lần và Stripe XOÁ nó khi link không còn dùng được: đo thật
+  // thấy cả succeeded lẫn failed đều trả HTTP 410 Gone -> render ảnh chỉ còn icon vỡ.
+  // Chỉ hiện khi link chưa có kết luận cuối (khách còn có thể quét).
+  const qrUsable = a.qr_png && !TERMINAL.includes(t.linkState);
+  if (qrUsable) {
+    html +=
+      '<div class="qr-wrap"><img class="qr" src="' + esc(safeUrl(a.qr_png)) + '" alt="QR UPI" loading="lazy"></div>' +
+      '<a class="qr-download" href="' + esc(safeUrl(a.qr_png)) + '" download>⭳ Download QR</a>';
+  }
+  return html + '</div>';
+}
+
+function logsHtml(t) {
+  if (!t.logs || !t.logs.length) return '';
+  const lines = t.logs.slice(-400);
+  return '<details class="logs"><summary>Logs (' + t.logs.length + ')</summary><pre>' + esc(lines.join('\n')) + '</pre></details>';
+}
+
+/* --------------------------- rendering ----------------------------- */
+
+// Build a task's row + detail container once and cache the row refs.
+// Icon copy (dùng cho 2 nút ở chế độ lưới). Inline SVG cho khớp style các nút khác.
+const CARD_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true">'
+  + '<rect x="9" y="9" width="11" height="11" rx="2"/>'
+  + '<path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg>';
+
+function createTaskEl(t) {
+  const wrap = document.createElement('div');
+  wrap.className = 'task';
+  wrap.dataset.taskId = t.task_id;
+
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'task-row';
+  row.setAttribute('aria-expanded', 'false');
+  row.innerHTML =
+    '<div class="task-row-top">' +
+      // Số thứ tự = dòng token trong ô dán (1-based), không phải thứ tự hiển thị —
+      // để đối chiếu kết quả về đúng dòng AT nào.
+      '<span class="task-idx mono"></span>' +
+      '<span class="task-email mono" title="Click to copy"></span>' +
+      '<span class="task-pct"></span>' +
+      '<span class="chip chip-gray"></span>' +
+      // Nút xoá từng task. Phải là <span role=button> chứ không phải <button>:
+      // cả cái row đã là 1 <button>, lồng button trong button là HTML không hợp lệ.
+      '<span class="task-remove" role="button" tabindex="0" title="Remove this task (also deletes the server copy)">✕</span>' +
+    '</div>' +
+    '<div class="task-row-status muted"></div>' +
+    '<div class="task-row-egress mono muted"></div>' +
+    '<div class="task-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Progress">' +
+      '<div class="task-bar-fill"></div>' +
+    '</div>';
+
+  const detail = document.createElement('div');
+  detail.className = 'task-detail';
+  detail.hidden = true;
+
+  const successResult = document.createElement('div');
+  successResult.className = 'success-result';
+  successResult.hidden = true;
+  successResult.innerHTML =
+    '<span class="success-card-status chip chip-green">Link created</span>' +
+    '<div class="success-fields">' +
+      '<div class="success-field"><span class="success-label">Email</span><strong class="success-email"></strong></div>' +
+      '<div class="success-field"><span class="success-label">Access token</span>' +
+        '<span class="success-tokenrow">' +
+          '<code class="success-token mono"></code>' +
+          '<button type="button" class="success-copyat" title="Copy the full access token">Copy AT</button>' +
+        '</span></div>' +
+      '<div class="success-field"><span class="success-label">Payment link</span>' +
+        '<span class="success-linkrow">' +
+          '<a class="success-link mono" target="_blank" rel="noopener noreferrer" title="Click to copy · Ctrl/Cmd-click or double-click to open"></a>' +
+          '<button type="button" class="success-open" title="Open in a new tab">Open ↗</button>' +
+        '</span></div>' +
+      '<div class="success-field success-amount-field" hidden><span class="success-label">Amount</span><strong class="success-amount"></strong><span class="success-expiry"></span><span class="success-verdict"></span></div>' +
+      // Link Stripe (return_url của session) — hiện NGAY DƯỚI link UPI, chiếm cả
+      // 2 cột. Dùng lại class .success-link/.success-open nên bấm-copy và
+      // bấm-đúp-mở hoạt động sẵn, không cần handler mới.
+      '<div class="success-field success-stripe-field" hidden>' +
+        '<span class="success-label">Stripe checkout</span>' +
+        '<span class="success-linkrow">' +
+          '<a class="success-link success-stripe mono" target="_blank" rel="noopener noreferrer" title="Click to copy · Ctrl/Cmd-click or double-click to open"></a>' +
+          '<button type="button" class="success-open" title="Open in a new tab">Open ↗</button>' +
+        '</span></div>' +
+      // Chế độ lưới chỉ giữ MỘT nút copy: AT. Link UPI đã bấm-là-copy ngay trên
+      // chính nó, còn QR thì bấm vào là mở/tải ảnh — thêm nút copy cho chúng là thừa.
+      // Link checkout Stripe (pay.openai.com/c/pay/…, 500-700 ký tự) không hiện và
+      // không có nút Open; vẫn tra/copy được ở chế độ danh sách + drawer.
+      '<div class="card-tools">' +
+        '<button type="button" class="card-tool card-copyat" title="Copy access token">' +
+          CARD_ICON + '<span>AT</span></button>' +
+      '</div>' +
+    '</div>' +
+    '<a class="success-qr-link" target="_blank" rel="noopener noreferrer" download>' +
+      '<img class="success-qr" alt="QR UPI" loading="lazy">' +
+      '<span>Download QR</span>' +
+    '</a>';
+
+  wrap.appendChild(row);
+  wrap.appendChild(successResult);
+  wrap.appendChild(detail);
+
+  // Bấm vào email = copy, không phải mở/đóng detail: listener của row chạy TRƯỚC
+  // handler copy gắn ở document, nên phải chặn ngay ở đây.
+  row.addEventListener('click', (ev) => {
+    if (ev.target.closest('.task-email, .detail-email')) return;
+    toggleDetail(t);
+  });
+
+  // ✕ trên từng task: chặn nổi bọt, không thì vừa xoá vừa mở/đóng detail
+  const rm = row.querySelector('.task-remove');
+  if (rm) {
+    rm.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      removeTask(t);
+    });
+    rm.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        removeTask(t);
+      }
+    });
+  }
+
+  t.el = {
+    wrap,
+    row,
+    detail,
+    successResult,
+    successEmail: successResult.querySelector('.success-email'),
+    successToken: successResult.querySelector('.success-token'),
+    successCopyAt: successResult.querySelector('.success-copyat'),
+    cardCopyAt: successResult.querySelector('.card-copyat'),
+    successLink: successResult.querySelector('.success-link'),
+    successAmountField: successResult.querySelector('.success-amount-field'),
+    successAmount: successResult.querySelector('.success-amount'),
+    successExpiry: successResult.querySelector('.success-expiry'),
+    successVerdict: successResult.querySelector('.success-verdict'),
+    successCardStatus: successResult.querySelector('.success-card-status'),
+    successStripeField: successResult.querySelector('.success-stripe-field'),
+    successStripe: successResult.querySelector('.success-stripe'),
+    successQrLink: successResult.querySelector('.success-qr-link'),
+    successQr: successResult.querySelector('.success-qr'),
+    email: row.querySelector('.task-email'),
+    idx: row.querySelector('.task-idx'),
+    pct: row.querySelector('.task-pct'),
+    chip: row.querySelector('.chip'),
+    remove: row.querySelector('.task-remove'),
+    status: row.querySelector('.task-row-status'),
+    egress: row.querySelector('.task-row-egress'),
+    bar: row.querySelector('.task-bar'),
+    barFill: row.querySelector('.task-bar-fill'),
+  };
+
+  // Tra ve chinh object refs (KHONG phai `wrap`) de
+  // `t.el = createTaskEl(t)` roi `t.el.wrap` hoat dong dung.
+  // `renumber()` duyệt thẳng children của #task-list, cần với tới badge số thứ tự
+  // mà không phải querySelector lại từng row (1000 row × mỗi lần update = chậm).
+  wrap._idxEl = t.el.idx;
+  return t.el;
+}
+
+// ---- 指引页监视：金额 / 倒计时 / 状态 --------------------------------
+// 落盘的 artifact 里 amount_minor 和 expires_at 都是 null（cs 流程不写），
+// 只能现抓 https://payments.stripe.com/upi/instructions/... 解出来。
+//
+// 注意这是**监视**语义，不是 zero-link 的「交付前核验」：
+// 那边 succeeded 表示「链已被用掉，别重复交付」，
+// 这里 succeeded 是**最好的结果** —— 客户成功签了委托。判据混用会把成功链报成死链。
+const STATUS_UI = {
+  waiting: ['⏳ Waiting for customer to scan', 'wait'],
+  succeeded: ['✅ Customer approved the mandate', 'ok'],
+  failed: ['❌ Failed — Stripe declined', 'bad'],
+  canceled: ['⛔ Cancelled', 'bad'],
+  expired: ['⌛ Expired — never scanned', 'warn'],
+  unknown: ['❔ Unknown state', 'warn'],
+};
+
+// "waiting" gộp 4 state khác nhau của intent, và chúng KHÁC NHAU về việc khách đã
+// làm gì: requires_action = chưa quét (không có tiền), processing = khách quét rồi
+// và Stripe đang xử lý. Ghi chung một câu "đang chờ khách duyệt" là nói sai một nửa.
+const WAIT_DETAIL = {
+  requires_action: 'Waiting for customer to scan',
+  requires_confirmation: 'Waiting for customer to confirm in their UPI app',
+  processing: 'Scanned — Stripe processing',
+  requires_capture: 'Mandate set — awaiting capture',
+};
+
+function verdictFor(p) {
+  if (p.status === 'waiting') {
+    return ['⏳ ' + (WAIT_DETAIL[p.intent_state] || 'Waiting for customer to scan'), 'wait'];
+  }
+  return STATUS_UI[p.status] || STATUS_UI.unknown;
+}
+const MONITOR_MS = Number(localStorage.getItem('upi-monitor-ms')) || 120000;   // lưới an toàn; server dò mỗi 30s và đẩy xuống
+const _probeCache = new Map();
+
+// Luôn kèm giây, kể cả khi còn > 1h: "23h 58m" đứng yên suốt 60 giây nên
+// trông như đồng hồ chết, user không biết countdown có chạy hay không.
+function fmtCountdown(secs) {
+  const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+  if (h > 0) return h + 'h ' + String(m).padStart(2, '0') + 'm ' + String(s).padStart(2, '0') + 's';
+  if (m > 0) return m + 'm ' + String(s).padStart(2, '0') + 's';
+  return s + 's';
+}
+
+// Mốc hết hạn tuyệt đối theo giờ máy user — để "còn 23h" có nghĩa cụ thể
+// (mấy giờ, ngày nào) chứ không phải một con số trôi nổi.
+function fmtDeadline(unixSecs) {
+  const d = new Date(unixSecs * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ' ' + p(d.getDate()) + '/' + p(d.getMonth() + 1);
+}
+
+function applyProbe(t, probe) {
+  if (!t.el) return;
+  const e = t.el;
+  const p = probe || {};
+
+  const st = effStatus(t, p);   // server kết luận cuối thì thắng probe cũ
+
+  if (p.ok) {
+    // Số tiền: phải là SỐ PHẢI TRẢ, không phải hạn mức.
+    //  • payload của uỷ nhiệm ₹0 KHÔNG có trường `amount` -> amount_minor=None.
+    //    Rơi vào nhánh dự phòng `p.am` là in ra ₹1,999.00 trong khi thực tế ₹0 —
+    //    đúng cái sai vừa bắt được trên job e0a538cbabcb.
+    //  • Thứ tự đúng: amount của probe -> amount lưu lúc chạy (đọc từ log) ->
+    //    0 nếu judge() nói là uỷ nhiệm ₹0 -> cuối cùng mới tới am, kèm title nói rõ
+    //    đó là hạn mức chứ không phải số phải trả.
+    const art = t.artifact || {};
+    // Uỷ nhiệm ₹0 (fam < am): probe KHÔNG trả boolean `zero_mandate` — nó trả
+    // `kind: 'zero_mandate'`. Trước đây UI kiểm tra `p.zero_mandate` (không tồn tại)
+    // nên nhánh này không bao giờ chạy, và khi thiếu amount thì rơi xuống in HẠN MỨC
+    // `am` = ₹1,999.00 trong khi uỷ nhiệm thực tế là ₹0 — đúng cái gây nhầm.
+    const zeroKind = p.kind === 'zero_mandate' || art.zero_mandate === true;
+    let minor = p.amount_minor;
+    if (minor == null && art.amount_minor != null) minor = art.amount_minor;
+    if (minor == null && zeroKind) minor = 0;
+
+    if (minor != null) {
+      e.successAmount.textContent = fmtAmount(minor) || '';
+      // Nói rõ số này lấy từ đâu: card đọc trang Stripe LIVE, còn drawer hiện giá trị
+      // đã chốt lúc trích xuất — hai thời điểm khác nhau nên có thể khác nhau.
+      e.successAmount.title = p.amount_minor != null
+        ? 'Live from the Stripe instructions page (now)'
+        : (zeroKind
+            ? '₹0 mandate — nothing charged now (cap ₹' + (p.am || '?') + ')'
+            : 'Recorded when this link was extracted');
+    } else if (p.am && !zeroKind) {
+      // Chỉ dùng `am` khi KHÔNG phải uỷ nhiệm ₹0: lúc đó am mới là số phải trả.
+      e.successAmount.textContent = fmtAmount(Math.round(parseFloat(p.am) * 100)) || '';
+      e.successAmount.title = 'Mandate cap (am=' + p.am + ') — charge amount unreadable';
+    } else {
+      e.successAmount.textContent = '';
+    }
+    // Đã bỏ dòng phụ chú "UỶ NHIỆM ₹0 · kỳ đầu ₹1.00 · hạn mức ₹1,999.00" theo yêu
+    // cầu — trên card chỉ cần đúng một con số phải trả (₹0.00 = uỷ nhiệm ₹0,
+    // ₹1,999.00 = chuỗi thu tiền). Số kỳ đầu / hạn mức vẫn tra được qua tooltip
+    // `title` của chính con số đó.
+
+    // 倒计时只在「还在等」的时候有意义 —— 它回答的是「我还能用多久」。
+    // 已经成功/已取消/已失败的链再显示「已过期」是误导：
+    // expires_at 是**指引页**的寿命，不是委托的寿命（委托的有效期在 URI 的
+    // validitystart/validityend 里，通常是十年）。
+    if (st === 'waiting' && p.expires_at) {
+      e.successExpiry.dataset.expires = p.expires_at;
+      e.successExpiry.hidden = false;
+    } else {
+      e.successExpiry.hidden = true;
+      e.successExpiry.textContent = '';
+    }
+
+    const [text, kind] = (st !== p.status && STATUS_UI[st])
+      ? STATUS_UI[st]          // server đã kết luận (succeeded/failed/canceled/expired)
+      : verdictFor(p);
+    e.successVerdict.textContent = text;
+    e.successVerdict.className = 'success-verdict ' + kind;
+    // 链的类型只在不是 ₹0 委托时戳出来，免得每张卡都多一行
+    e.successVerdict.title = (p.kind_label || '')
+      + (p.intent_state ? ' · state=' + p.intent_state : '')
+      + (st !== p.status ? ' · server=' + st : '');
+    e.successVerdict.hidden = false;
+
+    // CSS 描边选的是 .success-result[data-status]，以前写在 wrap(.task) 上，
+    // 选择器永远匹配不到 -> 左边那道颜色条一直没出现过。
+    if (e.successResult) {
+      e.successResult.dataset.status = st || '';
+    }
+  } else if (p.error) {
+    e.successVerdict.textContent = 'Could not read page: ' + p.error;
+    e.successVerdict.className = 'success-verdict warn';
+    e.successVerdict.hidden = false;
+  }
+
+  e.successAmountField.hidden = e.successAmount.textContent === ''
+    && e.successExpiry.hidden && e.successVerdict.hidden;
+
+  // Link Stripe: chỉ hiện khi probe đọc được `return_url`. Link dài (501–701 ký tự)
+  // nên để trong 1 dòng cuộn được, không làm vỡ layout.
+  const stripe = String(p.stripe_link || '');
+  if (e.successStripeField) {
+    e.successStripeField.hidden = !stripe;
+    if (stripe) {
+      e.successStripe.textContent = stripe;
+      e.successStripe.href = safeUrl(stripe);
+      e.successStripe.title = stripe;
+    }
+  }
+
+  setChip(t);   // probe về mới biết link sống/chết -> đổi màu chip theo kết quả đó
+  tickExpiry();
+}
+
+// Trước đây khoá cache là `url + '#fresh'` và KHÔNG bao giờ bị xoá -> gọi
+// `probeArtifact(t, true)` (ý nghĩa: hỏi lại Stripe) thật ra chỉ đọc lại đúng
+// promise cũ, không ra mạng lần nào. Hệ quả: card giữ mãi kết quả của lần dò đầu
+// (thường là "khách chưa quét") và lưới an toàn 2 phút lại ghi đè kết quả đúng do
+// server đẩy xuống. Giờ `fresh` không đọc và không ghi cache; cache chỉ dùng cho
+// lần đọc rẻ (không fresh) để render hàng loạt card lúc mới load.
+async function probeArtifact(t, fresh) {
+  const url = (t.artifact || {}).upi_link || '';
+  if (!/^https:\/\/payments\.stripe\.com\/upi\/instructions\//.test(url)) return null;
+  let entry;
+  if (fresh) {
+    entry = fetch('/api/artifact?url=' + encodeURIComponent(url) + '&fresh=1')
+      .then((res) => res.json())
+      .catch(() => ({ ok: false, error: 'request failed' }));
+  } else {
+    entry = _probeCache.get(url);
+    if (!entry) {
+      entry = fetch('/api/artifact?url=' + encodeURIComponent(url))
+        .then((res) => res.json())
+        .catch(() => ({ ok: false, error: 'request failed' }));
+      _probeCache.set(url, entry);
+    }
+  }
+  const probe = await entry;
+  // 结果落回**当前** Map 里的对象 —— 传进来那个可能已被 applySnapshot 换掉
+  const live = tasks.get(t.task_id) || t;
+  live.probe = probe;
+  applyProbe(live, probe);
+  return probe;
+}
+
+// 每 20 秒回访一次：过期 / 取消 / 成功都要及时看到。
+// 到了终态就停 —— 已经成功或已取消的链再问也没意义。
+function startMonitor(t) {
+  const st = (t.probe || {}).status;
+  // 一开始就落在终态就别启 —— 否则要等第一个 tick 才自己关掉
+  if (TERMINAL.includes(st)) return;
+  if (t._monitor) return;
+  // Việc dò chính giờ do SERVER làm nền và đẩy xuống qua event `task_link`
+  // (engine._link_monitor_loop). Ở đây chỉ giữ một lưới an toàn chậm, phòng khi
+  // vòng nền bị tắt (UPI_MONITOR_SECS=0) — không còn là cơ chế chính, nên để thưa
+  // hẳn: trước đây mỗi card tự hỏi mỗi 20s, 500 card là 25 request/giây từ một tab.
+  t._monitor = setInterval(async () => {
+    const live = tasks.get(t.task_id) || t;
+    if (TERMINAL.includes((live.probe || {}).status)) {
+      clearInterval(live._monitor);
+      live._monitor = null;
+      return;
+    }
+    await probeArtifact(live, true);
+  }, MONITOR_MS);
+}
+
+async function refreshArtifactNow(t) {
+  const probe = await probeArtifact(t, true);
+  if (probe && probe.ok) startMonitor(tasks.get(t.task_id) || t);
+  return probe;
+}
+
+function tickExpiry() {
+  const now = Math.floor(Date.now() / 1000);
+  document.querySelectorAll('.success-expiry[data-expires]').forEach((el) => {
+    const exp = parseInt(el.dataset.expires, 10) || 0;
+    if (!exp) { el.textContent = ''; return; }
+    const left = exp - now;
+    el.textContent = left > 0 ? 'expires in ' + fmtCountdown(left) : 'expired';
+    el.title = 'Expires ' + fmtDeadline(exp) + ' (your local time)';
+    el.classList.toggle('expired', left <= 0);
+  });
+}
+setInterval(tickExpiry, 1000);
+
+/* ---- Payment link: bấm = copy, có nút riêng để mở ----------------------
+   Trước đây .success-link là <a href> nên bấm vào là mở luôn, rất dễ mở nhầm
+   khi đang chỉ muốn lấy link đem đi dùng. Giờ:
+     • bấm             -> copy
+     • Ctrl/Cmd+bấm    -> mở tab mới (giữ nguyên thói quen của browser)
+     • bấm đúp         -> mở tab mới
+     • nút "Mở ↗"      -> mở tab mới (đường hiển thị rõ ràng)
+*/
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (err) {
+    // 非安全上下文 / 没权限时退回 execCommand
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      document.body.appendChild(ta);
+      ta.select();
+      const okDone = document.execCommand('copy');
+      ta.remove();
+      return okDone;
+    } catch (err2) {
+      return false;
+    }
+  }
+}
+
+/* ---- Hộp thoại xác nhận của app -----------------------------------------
+   Thay `confirm()` mặc định: confirm() chặn cứng luồng JS (mọi interval/SSE bị
+   treo trong lúc chờ), không tạo kiểu được, và vài browser chặn luôn.
+   Dùng:  const ok = await confirmDialog({title, text, okLabel, danger});
+*/
+let _modalResolve = null;
+
+function confirmDialog(opts) {
+  const o = opts || {};
+  return new Promise((resolve) => {
+    _modalResolve = resolve;
+    els.modalTitle.textContent = o.title || 'Confirm';
+    els.modalText.textContent = o.text || '';
+    els.modalOk.textContent = o.okLabel || 'Delete';
+    els.modalOk.classList.toggle('safe', o.danger === false);
+    els.modal.hidden = false;
+    els.modalOk.focus();
+  });
+}
+
+function closeModal(answer) {
+  if (els.modal.hidden) return;
+  els.modal.hidden = true;
+  const fn = _modalResolve;
+  _modalResolve = null;
+  if (fn) fn(!!answer);
+}
+
+function bindModal() {
+  els.modalOk.addEventListener('click', () => closeModal(true));
+  els.modalCancel.addEventListener('click', () => closeModal(false));
+  // Bấm ra ngoài = huỷ (thói quen chung), Esc = huỷ, Enter = đồng ý
+  els.modal.addEventListener('click', (ev) => { if (ev.target === els.modal) closeModal(false); });
+  document.addEventListener('keydown', (ev) => {
+    if (els.modal.hidden) return;
+    if (ev.key === 'Escape') { ev.preventDefault(); closeModal(false); }
+    else if (ev.key === 'Enter') { ev.preventDefault(); closeModal(true); }
+  });
+}
+
+function openLink(url) {
+  if (!url) return;
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+/* ---- Âm báo: task ra link QR, và khách quét uỷ nhiệm ---------------------
+   Browser chặn autoplay khi trang chưa có thao tác của người dùng. Trước khi bấm
+   "Chạy" thì chưa có gesture -> lần kêu đầu tiên có thể bị chặn. Nên khi bị chặn
+   ta ghi nhớ và mở khoá ở lần click/keydown kế tiếp, rồi kêu bù 1 tiếng.
+*/
+let notifyWanted = false;
+
+function notifyOn() {
+  return localStorage.getItem('upi-notify-off') !== '1';
+}
+
+function setNotify(on) {
+  if (on) localStorage.removeItem('upi-notify-off');
+  else localStorage.setItem('upi-notify-off', '1');
+  if (els.btnNotifyLabel) {
+    els.btnNotifyLabel.textContent = on ? 'Sound' : 'Muted';
+    els.btnNotify.classList.toggle('is-off', !on);
+  }
+}
+
+function playNotify() {
+  if (!notifyOn() || !els.notifyAudio) return;
+  try {
+    els.notifyAudio.currentTime = 0;
+    const p = els.notifyAudio.play();
+    if (p && typeof p.catch === 'function') {
+      p.catch(() => { notifyWanted = true; });   // chưa có gesture -> kêu bù sau
+    }
+  } catch (e) { /* bỏ qua: âm thanh là phụ trợ, không được làm vỡ luồng render */ }
+}
+
+// Mở khoá + kêu bù ở thao tác đầu tiên của người dùng
+function unlockNotify() {
+  if (!notifyWanted || !els.notifyAudio) return;
+  notifyWanted = false;
+  playNotify();
+}
+document.addEventListener('click', unlockNotify, { once: false });
+document.addEventListener('keydown', unlockNotify, { once: false });
+
+function toggleNotify() {
+  const on = !notifyOn();
+  setNotify(on);
+  toast(on ? '🔔 Sound on' : '🔕 Sound off');
+  if (on) playNotify();          // nghe thử luôn cho biết tiếng nào
+}
+
+document.addEventListener('click', async (ev) => {
+  // Email: bấm là copy (giống link / Copy AT), có hồi báo ✓ copied / ✗ copy failed.
+  const em = ev.target.closest('.task-email, .detail-email');
+  if (em) {
+    const text = (em.textContent || '').trim();
+    if (!text || text === '—') return;
+    ev.preventDefault();
+    const okEm = await copyToClipboard(text);
+    em.classList.remove('copied', 'copyfail');
+    void em.offsetWidth;
+    em.classList.add(okEm ? 'copied' : 'copyfail');
+    setTimeout(() => em.classList.remove('copied', 'copyfail'), 1400);
+    return;
+  }
+  const btn = ev.target.closest('.success-open');
+  if (btn) {
+    ev.preventDefault();
+    const field = btn.closest('.success-field');
+    const link = field && field.querySelector('.success-link');
+    openLink(link && (link.getAttribute('href') || link.textContent));
+    return;
+  }
+  // 2 nút icon ở chế độ lưới: copy AT và copy Link Stripe (cùng hồi báo ✓ copied).
+  const tool = ev.target.closest('.card-tool');
+  if (tool) {
+    ev.preventDefault();
+    let val = '';
+    if (tool.classList.contains('card-copyat')) {
+      val = tool.dataset.token || '';
+    } else {
+      const st = tool.closest('.success-result');
+      const link = st && st.querySelector('.success-link:not(.success-stripe)');
+      val = link ? (link.getAttribute('href') || link.textContent || '') : '';
+    }
+    if (!val) return;
+    const okTool = await copyToClipboard(val);
+    tool.classList.remove('copied', 'copyfail');
+    void tool.offsetWidth;
+    tool.classList.add(okTool ? 'copied' : 'copyfail');
+    setTimeout(() => tool.classList.remove('copied', 'copyfail'), 1400);
+    return;
+  }
+  const at = ev.target.closest('.success-copyat');
+  if (at) {
+    ev.preventDefault();
+    const token = at.dataset.token || '';
+    if (!token) return;
+    const okAt = await copyToClipboard(token);
+    at.classList.remove('copied', 'copyfail');
+    void at.offsetWidth;
+    at.classList.add(okAt ? 'copied' : 'copyfail');
+    setTimeout(() => at.classList.remove('copied', 'copyfail'), 1400);
+    return;
+  }
+  const link = ev.target.closest('.success-link');
+  if (!link) return;
+  const url = link.getAttribute('href') || link.textContent || '';
+  if (!url || url === 'No link') return;
+  // 让 Ctrl/Cmd/Shift+点击、中键走浏览器默认行为（新标签打开）
+  if (ev.ctrlKey || ev.metaKey || ev.shiftKey || ev.button === 1) return;
+  ev.preventDefault();
+  const okDone = await copyToClipboard(url);
+  link.classList.remove('copied', 'copyfail');
+  void link.offsetWidth;
+  link.classList.add(okDone ? 'copied' : 'copyfail');
+  setTimeout(() => link.classList.remove('copied', 'copyfail'), 1400);
+});
+
+document.addEventListener('dblclick', (ev) => {
+  const link = ev.target.closest('.success-link');
+  if (!link) return;
+  openLink(link.getAttribute('href') || link.textContent);
+});
+
+
+
+function renderRow(t) {
+  if (!t.el) return;
+  t.el.email.textContent = t.email || '';
+  if (t.el.idx && t.index != null) {
+    // Số hiển thị do `renumber()` đặt theo tab đang xem; ở đây chỉ ghi nhớ dòng
+    // token để tooltip nói rõ task này ứng với dòng AT nào.
+    t.el.idx.dataset.token = String(t.index + 1);
+  }
+  t.el.status.textContent = rowStatusText(t);
+  t.el.egress.textContent = rowEgressText(t);
+  const pct = taskProgress(t);
+  t.el.pct.textContent = pct + '%';
+  t.el.barFill.style.width = pct + '%';
+  t.el.bar.setAttribute('aria-valuenow', String(pct));
+
+  // Một nguồn duy nhất cho nhãn + màu chip (chipFor), không giữ bảng map thứ hai
+  // dễ lệch nhau — tab "Đã dừng" vừa thêm là ví dụ.
+  setChip(t);
+
+  const a = t.artifact || {};
+  t.el.successEmail.textContent = t.email || '—';
+  // AT 是 1~2 KB 的 JWT，铺满整格既挤又难读。只显示首尾各一小段，
+  // 需要完整值时点右边的「Copy AT」直接进剪贴板。
+  const token = t.token || '';
+  t.el.successToken.textContent = token ? maskToken(token) : '—';
+  t.el.successToken.title = token
+    ? 'Click "Copy AT" for the full token (' + token.length + ' chars)'
+    : '';
+  if (t.el.cardCopyAt) {
+    t.el.cardCopyAt.dataset.token = token;
+    t.el.cardCopyAt.disabled = !token;
+  }
+  if (t.el.successCopyAt) {
+    t.el.successCopyAt.dataset.token = token;
+    t.el.successCopyAt.disabled = !token;
+  }
+  const link = safeUrl(a.upi_link);
+  t.el.successLink.textContent = a.upi_link || 'No link';
+  t.el.successLink.href = link;
+  t.el.successLink.hidden = !a.upi_link;
+  t.el.successAmountField.hidden = a.amount_minor == null;
+  t.el.successAmount.textContent = fmtAmount(a.amount_minor) || '';
+  // 金额和到期时间在落盘的 artifact 里都是 null（cs 流程不写这两个字段），
+  // 只能现抓指引页。抓到之后 startMonitor 会每 20 秒回访一次。
+  applyProbe(t, t.probe);
+  if (t.probe) {
+    startMonitor(t);
+  } else {
+    refreshArtifactNow(t);
+  }
+
+  // Cùng lý do như trên: ảnh QR bị Stripe xoá khi link hết dùng được (410).
+  const qrOk = (a.qr_png || a.qr_svg) && !TERMINAL.includes(t.linkState);
+  const qr = safeUrl(a.qr_png || a.qr_svg);
+  t.el.successQrLink.hidden = !qrOk;
+  if (qrOk) {
+    t.el.successQrLink.href = qr;
+    t.el.successQrLink.download = 'upi-qr-' + (t.index + 1) + '.png';
+    if (!t.el.successQr._qrGuard) {
+      // Lưới an toàn: link còn "waiting" nhưng ảnh đã bị xoá (hết hạn 5 phút) ->
+      // ẩn ô QR thay vì để lại icon vỡ.
+      t.el.successQr._qrGuard = true;
+      t.el.successQr.addEventListener('error', () => {
+        t.el.successQrLink.hidden = true;
+      });
+    }
+    t.el.successQr.src = qr;
+  } else {    t.el.successQr.removeAttribute('src');
+  }
+  t.el.successResult.hidden = t.status !== 'success';
+}
+
+// Dòng IP hiện sẵn trên mỗi row: exit + billing (không cần click).
+function rowEgressText(t) {
+  const e = t.egress;
+  if (!e) return '';
+  const ex = e.exit || {};
+  const bl = e.billing || {};
+  const parts = [];
+  if (ex.ip) parts.push('exit ' + ex.ip + (ex.country ? ' (' + ex.country + ')' : ''));
+  if (bl.ip && bl.ip !== ex.ip) {
+    parts.push('billing ' + bl.ip + (e.billing_country ? ' (' + e.billing_country + ')' : ''));
+  }
+  return parts.join('  ·  ');
+}
+
+function renderDetailIfOpen(t) {
+  if (t.expanded) renderDetail(t);
+}
+
+function renderDetail(t) {
+  if (!t.el) return;
+  // Preserve the logs <details> open state across rebuilds.
+  const logsOpen = t.el.detail.querySelector('details.logs') != null &&
+                   t.el.detail.querySelector('details.logs').open;
+
+  const pct = taskProgress(t);
+  let finished = 0;
+  for (const s of t.steps) {
+    if (s.status === 'done' || s.status === 'fail') finished++;
+  }
+  const dur = 'Took ' + fmtDuration(t.duration_ms);
+  const errHtml = t.status === 'fail'
+    ? '<div class="error-banner">Task failed: ' + esc(failReason(t)) + '</div>'
+    : '';
+  const stepsHtml = t.steps.map(stepHtml).join('');
+
+  t.el.detail.innerHTML =
+    '<div class="detail-head">' +
+      '<span class="detail-email mono" title="Click to copy">' + esc(t.email || '') + '</span>' +
+      '<div class="detail-actions">' +
+        '<button type="button" class="btn btn-retry">↻ Retry</button>' +
+        '<button type="button" class="btn btn-remove">✕ Remove</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="detail-section">' +
+      '<div class="exec-row">' + chipHtml(t) + '<span class="muted">' + dur + '</span>' +
+        '<span class="run-label">Run ' + (t.run || 1) + '</span></div>' +
+      errHtml +
+    '</div>' +
+    '<div class="progress-section">' +
+      '<div class="progress-head"><span class="muted">Overall progress</span><span class="pct">' + pct + '%</span></div>' +
+      '<div class="progressbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '">' +
+        '<div class="fill" style="width:' + pct + '%"></div></div>' +
+      '<div class="muted steps-line">' + finished + ' / ' + t.steps.length + ' steps complete · Run ' + (t.run || 1) + '</div>' +
+    '</div>' +
+    flowCardHtml(t) +
+    '<div class="step-grid">' + stepsHtml + '</div>' +
+    artifactHtml(t) +
+    logsHtml(t) +
+    '<div class="detail-footer muted">Created ' + esc(t.created_at || '—') + ' · Updated ' + esc(t.updated_at || '—') + '</div>';
+
+  const logs = t.el.detail.querySelector('details.logs');
+  if (logsOpen && logs) logs.open = true;
+
+  t.el.detail.querySelector('.btn-retry').addEventListener('click', () => retryTask(t));
+  t.el.detail.querySelector('.btn-remove').addEventListener('click', () => removeTask(t));
+}
+
+function toggleDetail(t) {
+  t.expanded = !t.expanded;
+  if (t.expanded) {
+    renderDetail(t);
+  } else {
+    t.el.detail.innerHTML = '';
+  }
+  t.el.detail.hidden = !t.expanded;
+  t.el.row.setAttribute('aria-expanded', String(t.expanded));
+}
+
+/* ------------------------- counters / UI --------------------------- */
+
+// Dem task theo tung nhom trong hang doi.
+function countByStatus() {
+  const c = { all: tasks.size, running: 0, queued: 0, success: 0, fail: 0, stopped: 0 };
+  for (const t of tasks.values()) {
+    if (t.status === 'running') c.running++;
+    else if (t.status === 'success') c.success++;
+    else if (t.status === 'fail') c.fail++;
+    else if (t.status === 'stopped') c.stopped++;
+    else c.queued++;
+  }
+  return c;
+}
+
+function updateCounters() {
+  const c = countByStatus();
+
+  els.statRunning.textContent = c.running;
+  els.statQueued.textContent = c.queued;
+  els.statSuccess.textContent = c.success;
+  els.statFail.textContent = c.fail;
+  els.statStopped.textContent = c.stopped;
+
+  const total = state.total || tasks.size || 0;
+  const pct = total ? Math.round(((c.success + c.fail) / total) * 100) : 0;
+  els.overallPct.textContent = pct + '%';
+  els.overallFill.style.width = pct + '%';
+  els.overallBar.setAttribute('aria-valuenow', String(pct));
+  els.overallCount.textContent =
+    (c.success + c.fail) + '/' + total + ' done · ' + c.running + ' running · ' + c.queued + ' queued'
+    + (c.stopped ? ' · ' + c.stopped + ' stopped' : '');
+
+  // so tren tung tab
+  for (const f of QUEUE_FILTERS) {
+    const el = els.tabCounts[f.key];
+    if (el) el.textContent = c[f.key];
+  }
+
+  applyFilter();
+  updateEmptyState();
+  updateQueueLoading();
+
+  // Nút "Dọn dẹp" nói rõ nó sắp xoá tab nào và bao nhiêu task — nút ✕ nhỏ trên tab
+  // trước đây khó thấy, user phải đi xoá từng card một.
+  if (els.btnClearTabLabel) {
+    const label = (QUEUE_FILTERS.find(f => f.key === state.filter) || {}).label || '';
+    const n = state.filter === 'all' ? tasks.size : (c[state.filter] || 0);
+    els.btnClearTabLabel.textContent = 'Clear "' + label + '"' + (n ? ' (' + n + ')' : '');
+    els.btnClearTab.disabled = n === 0;
+  }
+}
+
+// Server đẩy task_init cho **toàn bộ** token ngay khi bắt đầu (engine._job_worker),
+// nên đếm được đúng số task đã vào queue: N/total chạy từ 1..total rồi tự ẩn.
+function updateQueueLoading() {
+  const el = els.queueLoading;
+  if (!el) return;
+
+  // 1) Giai đoạn chờ /api/run trả về: server đang quét + lọc pool proxy (khi bật
+  //    "Chỉ dùng proxy sạch") HOẶC chỉ đang tạo job. Lúc này CHƯA có job -> không
+  //    có gì để đếm, nên hiện đồng hồ chạy giây thay cho thanh %.
+  if (state.starting) {
+    el.hidden = false;
+    const secs = Math.max(0, Math.floor((Date.now() - (state.startingAt || Date.now())) / 1000));
+    // KHÔNG in số proxy đã dán: số dòng trong textarea khác xa số proxy server
+    // thực sự quét — parse_proxy_lines() bỏ dòng rác và chuẩn hoá host:port:user:pass,
+    // đo được 6799 dòng dán vào nhưng server chỉ nhận 100. Ghi "quét 6799 proxy" là
+    // nói sai và làm user tưởng phải chờ hàng giờ.
+    els.queueLoadingText.textContent = els.useFilter.checked
+      ? 'Scanning proxy pool… ' + fmtElapsed(secs)
+      : 'Creating job… ' + fmtElapsed(secs);
+    els.queueLoadingFill.style.width = '100%';   // thanh chạy mờ (indeterminate)
+    el.classList.add('indeterminate');
+    return;
+  }
+  el.classList.remove('indeterminate');
+
+  // 2) Job đã tạo, task_init đang về: đếm thật N/total rồi tự ẩn khi nạp đủ.
+  const total = state.total || 0;
+  const loaded = tasks.size;
+  const show = state.running && total > 0 && loaded < total;
+  el.hidden = !show;
+  if (!show) return;
+  els.queueLoadingText.textContent = 'Filling queue… ' + loaded + '/' + total;
+  els.queueLoadingFill.style.width = Math.round((loaded / total) * 100) + '%';
+}
+
+function fmtElapsed(secs) {
+  const m = Math.floor(secs / 60), s = secs % 60;
+  return m > 0 ? m + 'm ' + String(s).padStart(2, '0') + 's' : s + 's';
+}
+
+// Mỗi giây cập nhật lại banner "đang chuẩn bị" (đồng hồ chạy) cho tới khi có job.
+setInterval(() => { if (state.starting) updateQueueLoading(); }, 1000);
+
+// An/hien tung hang theo tab dang chon. Chi doi hidden, khong render lai.
+// Ten tab (bucket) khac ten status cua task: tab 'queued' ung voi task.status 'pending'.
+const FILTER_TO_STATUS = {
+  running: 'running',
+  queued: 'pending',
+  success: 'success',
+  fail: 'fail',
+  stopped: 'stopped',
+};
+
+function taskMatchesFilter(t) {
+  if (state.filter === 'all') return true;
+  return t.status === FILTER_TO_STATUS[state.filter];
+}
+
+// Thứ tự row trong #task-list.
+//   • tab Success  -> theo THỜI ĐIỂM THÀNH CÔNG (card thành công trước nằm trên).
+//     Trước đây mọi tab đều theo dòng token nên card thành công sau nhưng có dòng
+//     token sớm hơn lại nhảy lên trên, đẩy card thành công trước xuống.
+//   • tab khác      -> theo dòng token như cũ.
+// Chỉ chèn lại DOM khi thứ tự thật sự khác, để không phải sắp lại 1000 row mỗi event.
+function orderRows() {
+  const cur = [...els.taskList.children];
+  if (cur.length < 2) return;
+  const key = (w) => {
+    const t = tasks.get(w.dataset.taskId) || {};
+    return state.filter === 'success'
+      ? [t.doneAt || 0, t.index == null ? 0 : t.index]
+      : [t.index == null ? 0 : t.index, 0];
+  };
+  const want = cur.slice().sort((a, b) => {
+    const ka = key(a), kb = key(b);
+    return ka[0] - kb[0] || ka[1] - kb[1];
+  });
+  let same = true;
+  for (let i = 0; i < cur.length; i++) {
+    if (cur[i] !== want[i]) { same = false; break; }
+  }
+  if (same) return;
+  const frag = document.createDocumentFragment();
+  for (const w of want) frag.appendChild(w);
+  els.taskList.appendChild(frag);
+}
+
+function applyFilter() {
+  orderRows();
+  let visible = 0;
+  for (const t of tasks.values()) {
+    const show = taskMatchesFilter(t);
+    if (show) visible++;
+    if (!t.el || !t.el.wrap) continue;
+    t.el.wrap.hidden = !show;
+  }
+  renumber();
+  els.listEmpty.hidden = !(tasks.size > 0 && visible === 0);
+  if (els.listEmpty) {
+    const label = (QUEUE_FILTERS.find(f => f.key === state.filter) || {}).label || '';
+    els.listEmpty.textContent = 'No tasks in "' + label + '".';
+  }
+}
+
+// Đánh số thứ tự theo DANH SÁCH ĐANG HIỂN THỊ: đổi tab thì bắt đầu lại từ #1.
+// (Trước đó lấy theo dòng token nên ở tab "Thành công" có 1 card vẫn hiện #397 —
+// đúng về dòng AT nhưng vô nghĩa khi đang đếm trong tab.) Dòng token vẫn còn
+// trong tooltip để tra ngược.
+function renumber() {
+  let n = 0;
+  for (const wrap of els.taskList.children) {
+    const idx = wrap._idxEl;
+    if (!idx) continue;
+    if (wrap.hidden) {
+      if (idx.textContent) { idx.textContent = ''; idx.removeAttribute('title'); }
+      continue;
+    }
+    n++;
+    const want = '#' + n;
+    if (idx.textContent !== want) idx.textContent = want;
+    const token = idx.dataset.token || '';
+    idx.title = token
+      ? 'Task #' + n + ' in this tab · token line ' + token + ' in the tokens box'
+      : 'Task #' + n + ' in this tab';
+  }
+}
+
+function setFilter(key) {
+  state.filter = key;
+  document.body.dataset.filter = key;
+  document.querySelectorAll('.tab').forEach(b => {
+    const active = b.dataset.filter === key;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-selected', String(active));
+  });
+  updateCounters();
+}
+
+function setView(view, persist = true) {
+  state.view = view === 'grid' ? 'grid' : 'list';
+  document.body.dataset.view = state.view;
+  document.querySelectorAll('.view-option').forEach(button => {
+    const active = button.dataset.view === state.view;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  if (persist) saveForm();
+}
+
+function updateEmptyState() {
+  els.emptyState.hidden = tasks.size > 0;
+}
+
+function setJobBadge(jobId) {
+  if (els.jobIdInput) {
+    els.jobIdInput.value = jobId || '';
+    els.jobIdInput.classList.remove('bad');
+  }
+}
+
+// Đổ danh sách job id đã biết vào <datalist> để gõ tới đâu gợi ý tới đó.
+async function fillJobIdList() {
+  if (!els.jobIdList) return;
+  try {
+    const res = await fetch('/api/jobs');
+    if (!res.ok) return;
+    const data = await res.json();
+    renderJobHistory(data.jobs || []);
+    els.jobIdList.innerHTML = '';
+    for (const j of data.jobs || []) {
+      const opt = document.createElement('option');
+      // Nội dung gợi ý = job id (để dán/Enter là chạy), nhãn kèm trạng thái cho dễ chọn
+      opt.value = j.job_id;
+      opt.label = [j.status, j.done + '/' + j.total,
+                   j.ok ? 'ok ' + j.ok : '', j.fail ? 'fail ' + j.fail : '',
+                   j.started_at || ''].filter(Boolean).join(' · ');
+      els.jobIdList.appendChild(opt);
+    }
+  } catch (e) { /* không có danh sách cũng không sao, vẫn dán tay được */ }
+}
+
+// "2026-10-04 11:01:20" -> "11:01 · 04/10". Rỗng thì trả "—".
+function fmtJobTime(started) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(String(started || ''));
+  if (!m) return '—';
+  return m[4] + ':' + m[5] + ' · ' + m[3] + '/' + m[2];
+}
+
+// Lịch sử job: server giữ file kết quả trên đĩa nên job cũ (kể cả job chết vì
+// restart) vẫn mở lại được. Trước đây chỉ có datalist ẩn trong ô Job ID — phải
+// biết id mới dùng được, nên thêm danh sách bấm-được ở đây.
+function renderJobHistory(jobs) {
+  if (!els.historyList) return;
+  const all = jobs || [];
+  // Server trả theo thứ tự RAM-trước / mtime file kết quả, không theo thời gian
+  // chạy -> sắp lại, mới nhất lên đầu cho dễ tìm.
+  const list = all.slice().sort((a, b) =>
+    String(b.started_at || '').localeCompare(String(a.started_at || ''))).slice(0, 40);
+  if (els.historyCount) els.historyCount.textContent = String(all.length);
+  if (!list.length) {
+    els.historyList.innerHTML = '<div class="history-empty">No jobs yet</div>';
+    return;
+  }
+  els.historyList.innerHTML = list.map((j) => {
+    const st = j.status === 'running' ? 'running'
+             : j.status === 'done' ? 'done' : 'stopped';
+    const stat = [];
+    if (j.ok) stat.push('<b class="ok">' + j.ok + '</b> ok');
+    if (j.fail) stat.push('<b class="bad">' + j.fail + '</b> fail');
+    if (!stat.length) stat.push((j.done || 0) + '/' + (j.total || 0));
+    const title = j.job_id + ' · ' + st + ' · ' + (j.done || 0) + '/' + (j.total || 0)
+                + ' task' + (j.started_at ? ' · ' + j.started_at : '');
+    return '<button type="button" class="history-row'
+      + (j.job_id === state.jobId ? ' is-current' : '')
+      + '" data-job="' + esc(j.job_id) + '" title="' + esc(title) + '">'
+      + '<span class="history-when">' + esc(fmtJobTime(j.started_at)) + '</span>'
+      + '<span class="history-id mono">' + esc(j.job_id) + '</span>'
+      + '<span class="history-stat">' + stat.join(' · ') + '</span>'
+      + '<span class="history-status is-' + st + '">' + st + '</span>'
+      + '</button>';
+  }).join('');
+  markCurrentJob();
+}
+
+// Đánh dấu dòng của job đang mở. Gọi lại mỗi lần đổi job (không fetch lại).
+function markCurrentJob() {
+  if (!els.historyList) return;
+  for (const row of els.historyList.querySelectorAll('.history-row')) {
+    row.classList.toggle('is-current', row.dataset.job === state.jobId);
+  }
+}
+
+// Xem lịch sử của một job bất kỳ theo id dán vào.
+async function loadJobById(raw) {
+  const id = String(raw || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{12}$/.test(id)) {
+    els.jobIdInput.classList.add('bad');
+    toast('Job ID must be 12 hex chars (0-9a-f).');
+    return;
+  }
+  // Kiểm tra trước rồi mới attach: attachJob() không báo lỗi, sẽ để lại bảng trống
+  // mà không nói vì sao.
+  let data;
+  try {
+    const res = await fetch('/api/state/' + id);
+    if (!res.ok) { els.jobIdInput.classList.add('bad'); toast('Job not found: ' + id); return; }
+    data = await res.json();
+  } catch (e) {
+    toast('Connection lost loading job ' + id);
+    return;
+  }
+  closeES();
+  detachMonitors();
+  attachJob(id);
+  toast('Viewing job ' + id + ' · ' + (data.tasks || []).length + ' task'
+        + (data.status ? ' · ' + data.status : ''));
+}
+
+// Tắt hết interval dò link của job cũ trước khi chuyển job
+function detachMonitors() {
+  for (const t of tasks.values()) {
+    if (t._monitor) { clearInterval(t._monitor); t._monitor = null; }
+  }
+}
+
+function getTokens() {
+  return els.tokens.value.split('\n').map(s => s.trim()).filter(Boolean);
+}
+
+function getProxies() {
+  const lines = els.proxies.value.split('\n').map(s => s.trim()).filter(Boolean);
+  return lines.length ? lines.join('\n') : null;
+}
+
+// Đọc số worker từ input + nói rõ khi phải kẹp lại. Trước đây kẹp ÂM THẦM
+// (`Math.min(32, ...)`) nên gõ 40 mà job chạy 32 và không ai biết vì sao.
+function readWorkers() {
+  const raw = parseInt(els.workers.value, 10);
+  const want = Number.isNaN(raw) ? 4 : raw;
+  return {
+    raw: want,
+    value: Math.max(1, Math.min(MAX_WORKERS, want)),
+    clamped: want > MAX_WORKERS,
+  };
+}
+
+function updateTokenCount() {
+  const n = getTokens().length;
+  const w = readWorkers();
+  const warnRam = (w.clamped || w.value > RAM_WARN_WORKERS)
+    ? w.value + ' workers ≈ ' + (w.value * 70 / 1024).toFixed(1) + ' GB RAM for extract_cs subprocesses.'
+      + (w.clamped ? ' Capped at ' + MAX_WORKERS + ' (you asked for ' + w.raw + ').' : '')
+    : '';
+  els.tokenCount.textContent = n + ' token' + plural(n) + ' detected';
+  els.summaryTasks.textContent = n + ' task' + plural(n) + ' × 1 use each';
+  els.summaryTotal.textContent = 'Total uses: ' + n;
+  // Cảnh báo: RAM khi worker vượt ngưỡng (mỗi task là 1 subprocess extract_cs ~70 MB),
+  // còn lại là cảnh báo token như cũ. Một dòng, một nguồn.
+  const warn = warnRam
+    || (n > 0 ? n + ' token' + plural(n) + ' ready. Tasks over quota may fail.' : '');
+  els.warning.hidden = !warn;
+  els.warning.textContent = warn;
+  setSubmitState();
+}
+
+function setSubmitState() {
+  const n = getTokens().length;
+  if (state.starting) {
+    // POST /api/run còn treo vì server đang quét/lọc pool proxy — lúc này chưa có
+    // job để "dừng", nên bấm nút chỉ gây lỗi; hiện trạng thái bận cho rõ.
+    els.submit.textContent = 'Preparing job…';
+    els.submit.classList.remove('danger');
+    els.submit.disabled = true;
+  } else if (state.stopping) {
+    els.submit.textContent = 'Stopping…';
+    els.submit.classList.add('danger');
+    els.submit.disabled = true;
+  } else if (state.running) {
+    els.submit.textContent = 'Stop job';
+    els.submit.classList.add('danger');
+    els.submit.disabled = false;
+  } else {
+    els.submit.textContent = 'Run ' + n + ' checkout task' + plural(n);
+    els.submit.classList.remove('danger');
+    els.submit.disabled = n === 0;
+  }
+  // 停止期间给整个队列加个标记：正在跑的卡会显示「đang huỷ…」，
+  // 让用户看到「停止确实在做事情」，而不是只看到按钮变灰、任务照旧在跑。
+  updateCounters();
+}
+
+function updateModeHint() {
+  els.modeHint.textContent = MODE_HINTS[state.mode] || MODE_HINTS.auto;
+}
+
+function setMode(mode) {
+  state.mode = mode;
+  document.querySelectorAll('.seg').forEach(b => {
+    const active = b.dataset.mode === mode;
+    b.classList.toggle('active', active);
+    b.setAttribute('aria-checked', String(active));
+  });
+  updateModeHint();
+  if (typeof saveForm === 'function') saveForm();
+}
+
+function toast(msg) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  els.toasts.appendChild(el);
+  setTimeout(() => {
+    el.classList.add('out');
+    setTimeout(() => el.remove(), 300);
+  }, 4000);
+}
+
+/* --------------------------- SSE handling -------------------------- */
+
+function ensureTask(taskId) {
+  let t = tasks.get(taskId);
+  if (!t) {
+    t = newTask(taskId);
+    tasks.set(taskId, t);
+    t.el = createTaskEl(t);
+    els.taskList.appendChild(t.el.wrap);
+  }
+  return t;
+}
+
+function handleEvent(evt) {
+  if (!evt || typeof evt !== 'object' || !evt.type) return;
+  switch (evt.type) {
+    case 'job_start': onJobStart(evt); break;
+    case 'task_init': onTaskInit(evt); break;
+    case 'task_flow': onTaskFlow(evt); break;
+    case 'step': onStep(evt); break;
+    case 'egress': onEgress(evt); break;
+    case 'log': onLog(evt); break;
+    case 'task_artifact': onArtifact(evt); break;
+    case 'task_link': onTaskLink(evt); break;
+    case 'task_done': onTaskDone(evt); break;
+    case 'job_done': onJobDone(evt); break;
+    case 'job_stopping': onJobStopping(evt); break;
+    case 'error': toast(evt.message || 'Error'); break;
+    case 'state': applySnapshot(evt.job || {}); break;
+    case 'task_start': onTaskStart(evt); break;
+    case 'job_progress': updateCounters(); break;
+  }
+}
+
+function onJobStart(evt) {
+  state.jobId = evt.job_id || state.jobId;
+  state.total = evt.total || 0;
+  state.mode = evt.mode || 'auto';
+  state.running = true;
+  state.stopping = false;
+  setJobBadge(state.jobId);
+  setSubmitState();
+}
+
+function onJobStopping() {
+  state.running = true;
+  state.stopping = true;
+  setSubmitState();
+}
+
+function onTaskStart(evt) {
+  const t = ensureTask(evt.task_id);
+  t.status = 'running';
+  if (evt.run != null) t.run = evt.run;
+  renderRow(t);
+  renderDetailIfOpen(t);
+  updateCounters();
+}
+
+function onTaskInit(evt) {
+  const t = ensureTask(evt.task_id);
+  if (evt.index != null) t.index = evt.index;
+  t.token = state.tokens[t.index] || '';
+  if (evt.email != null) t.email = evt.email;
+  if (Object.prototype.hasOwnProperty.call(evt, 'flow')) t.flow = evt.flow || null;
+  t.steps = (evt.steps || []).map(s => ({ key: s.key, label: s.label || s.key, status: 'pending', detail: '', err: '' }));
+  if (t.steps.length) t.status = 'pending';
+  renderRow(t);
+  renderDetailIfOpen(t);
+  updateCounters();
+}
+
+function onTaskFlow(evt) {
+  const t = ensureTask(evt.task_id);
+  if (evt.flow != null) t.flow = evt.flow;
+  if (evt.flow_label != null) t.flow_label = evt.flow_label;
+  // Flow became known: REPLACE the step list with the flow-specific steps.
+  t.steps = (evt.steps || []).map(s => ({ key: s.key, label: s.label || s.key, status: 'pending', detail: '', err: '' }));
+  renderRow(t);
+  renderDetailIfOpen(t);
+}
+
+function onStep(evt) {
+  const t = ensureTask(evt.task_id);
+  const s = t.steps.find(x => x.key === evt.key);
+  if (!s) return;
+  if (evt.status) s.status = evt.status;
+  if (evt.detail != null) s.detail = evt.detail;
+  if (evt.err != null) s.err = evt.err;
+  if (evt.status === 'active') t.status = 'running';
+  renderRow(t);
+  renderDetailIfOpen(t);
+  updateCounters();
+}
+
+function onEgress(evt) {
+  const t = ensureTask(evt.task_id);
+  const ex = evt.exit || {};
+  const bl = evt.billing || {};
+  t.egress = {
+    proxy: evt.proxy || '',
+    exit: ex,
+    billing: bl,
+    billing_country: evt.billing_country || '',
+    same_ip: evt.same_ip != null ? evt.same_ip : (ex.ip && ex.ip === bl.ip),
+    probed_at: evt.probed_at || '',
+    billing_geo: evt.billing_geo || null,
+    // tuong thich nguoc voi du lieu cu chi co 1 IP
+    ip: ex.ip || evt.ip || '',
+    location: fmtGeo(ex) || evt.location || '',
+  };
+  renderRow(t);
+  renderDetailIfOpen(t);
+}
+
+function fmtGeo(g) {
+  if (!g) return '';
+  return [g.city, g.region, g.country].filter(Boolean).join(', ');
+}
+
+function onLog(evt) {
+  // Log cấp JOB (task_id == "*": "== stop requested ==", "proxy gate …") không thuộc
+  // task nào. Trước đây ensureTask("*") tạo ra một task MA không có email/token,
+  // nằm mãi trong tab "Đang chờ" và gom hết log cấp job (thấy 391 dòng ở đó).
+  // Bỏ qua ở đây; các dòng này vẫn đầy đủ trong logs/web_<job>.log trên đĩa.
+  if (evt.task_id === '*') return;
+  const t = ensureTask(evt.task_id);
+  if (typeof evt.line === 'string') {
+    t.logs.push(evt.line);
+    if (t.logs.length > 1000) t.logs = t.logs.slice(-1000);
+  }
+  renderDetailIfOpen(t);
+}
+
+// Server dò link ở NỀN và đẩy xuống đây mỗi khi trạng thái đổi (khách quét được /
+// link chết). Nhờ vậy không cần browser tự setInterval 20s nữa — đóng tab vẫn có
+// người theo dõi, và mở lại là thấy kết quả mới nhất.
+function onTaskLink(evt) {
+  const live = tasks.get(evt.task_id);
+  if (!live) return;
+  live.linkState = evt.link_state || '';
+  live.linkFlipAt = evt.link_flip_at || 0;
+  live.linkZero = !!evt.link_zero;
+  if (evt.probe && evt.probe.ok) {
+    live.probe = evt.probe;
+    // Render lại: link đổi trạng thái thì phần QR phải vẽ lại theo — uỷ nhiệm vừa
+    // được duyệt là Stripe xoá ảnh QR (410 Gone) nên ảnh cũ thành icon vỡ.
+    renderRow(live);
+    applyProbe(live, evt.probe);
+    const who = evt.link_state === 'succeeded' ? 'CUSTOMER SCANNED — mandate succeeded'
+              : evt.link_state === 'failed' ? 'Link dead'
+              : evt.link_state === 'expired' ? 'Link expired, never scanned'
+              : evt.link_state === 'canceled' ? 'Link cancelled' : '';
+    if (who) {
+      // "Khách đã quét" đáng kêu hơn cả lúc ra link — đây mới là lúc có uỷ nhiệm thật
+      if (evt.link_state === 'succeeded') {
+        playNotify();
+        toast('🔔 ' + (live.email || evt.task_id) + ' — ' + who
+              + (evt.age ? ' (sau ' + evt.age + 's)' : ''));
+      } else {
+        toast(who + (evt.age ? ' (sau ' + evt.age + 's)' : ''));
+      }
+    }
+  }
+}
+
+function onArtifact(evt) {
+  const t = ensureTask(evt.task_id);
+  t.artifact = {
+    upi_link: evt.upi_link || null,
+    qr_png: evt.qr_png || null,
+    qr_svg: evt.qr_svg || null,
+    amount_minor: evt.amount_minor != null ? evt.amount_minor : null,
+    intent: evt.intent || null,
+  };
+  renderDetailIfOpen(t);
+}
+
+function onTaskDone(evt) {
+
+  const t = ensureTask(evt.task_id);
+  t.rawStatus = evt.status || null;
+  t.status = normalizeStatus(evt.ok ? 'done' : 'fail', evt.status);
+  t.error = evt.error || null;
+  t.duration_ms = evt.duration_ms != null ? evt.duration_ms : null;
+  if (evt.updated_at) t.updated_at = evt.updated_at;
+  // Mốc xong: dùng số của server; server cũ không gửi thì lấy giờ máy.
+  t.doneAt = evt.done_at || Math.floor(Date.now() / 1000);
+  renderRow(t);
+  renderDetailIfOpen(t);
+  updateCounters();
+  // Task vừa ra link QR -> kêu + báo tên account. Mắt không thể canh 1000 dòng.
+  if (t.status === 'success' && !t.notified) {
+    t.notified = true;
+    playNotify();
+    toast('✅ ' + (t.email || t.task_id) + ' — QR link ready');
+  }
+}
+
+function onJobDone(evt) {
+  state.running = false;
+  state.stopping = false;
+  state.jobId = evt.job_id || state.jobId;
+  closeES();
+  setSubmitState();
+  toast(evt.status === 'stopped'
+    ? 'Job stopped · ' + (evt.done ?? 0) + '/' + (evt.total ?? 0) + ' tasks processed'
+    : 'Job finished: ' + (evt.ok ?? 0) + ' ok · ' + (evt.fail ?? 0) + ' fail');
+  fillJobIdList();   // job vừa xong đã có file kết quả -> cập nhật lại lịch sử
+}
+
+function closeES() {
+  if (state.es) {
+    state.es.close();
+    state.es = null;
+  }
+}
+
+function connectES(jobId) {
+  closeES();
+  let reconnecting = false;
+  let hadConnection = false;
+  const es = new EventSource('/api/stream/' + jobId);
+  es.onmessage = e => {
+    try { handleEvent(JSON.parse(e.data)); } catch (err) { /* ignore malformed frames */ }
+  };
+  es.onopen = () => {
+    if (reconnecting && hadConnection) {
+      toast('Reconnected');
+      loadState(jobId);
+    }
+    reconnecting = false;
+    hadConnection = true;
+  };
+  es.onerror = () => {
+    if (!reconnecting) toast('Disconnected, retrying…');
+    reconnecting = true;
+  };
+  state.es = es;
+}
+
+/* -------------------------- snapshot reload ------------------------ */
+
+async function loadState(jobId) {
+  let data;
+  try {
+    const res = await fetch('/api/state/' + jobId);
+    if (!res.ok) return;
+    data = await res.json();
+  } catch (e) {
+    return;
+  }
+  applySnapshot(data);
+}
+
+function applySnapshot(data) {
+  tasks.clear();
+  els.taskList.innerHTML = '';
+  state.jobId = data.job_id || state.jobId;
+  state.total = data.total || 0;
+  state.mode = data.mode || 'auto';
+  state.running = data.status === 'running';
+  state.stopping = !!data.stop_requested && state.running;
+  setJobBadge(state.jobId);
+  setSubmitState();
+
+  for (const td of data.tasks || []) {
+    const t = newTask(td.task_id);
+    t.index = td.index != null ? td.index : 0;
+    t.email = td.email || '';
+    t.token = state.tokens[t.index] || '';
+    t.flow = td.flow || null;
+    t.flow_label = td.flow_label || null;
+    t.steps = (td.steps || []).map(s => ({
+      key: s.key,
+      label: s.label || s.key,
+      status: s.status || 'pending',
+      detail: s.detail || '',
+      err: s.err || '',
+    }));
+    t.rawStatus = td.raw_status || td.status || null;
+    t.status = normalizeStatus(td.status, td.raw_status);
+    t.error = td.error || null;
+    t.duration_ms = td.duration_ms != null ? td.duration_ms : null;
+    // mốc xong -> tab Success sắp theo thứ tự thành công, không theo dòng token
+    t.doneAt = td.done_at || 0;
+    t.run = td.run || 1;
+    t.egress = td.egress || null;
+    t.artifact = td.artifact || null;
+    // Kết luận của server về link (succeeded/failed/...) — snapshot mang sẵn,
+    // trước đây bị bỏ nên sau F5 card chỉ còn biết kết quả lần dò của chính nó.
+    t.linkState = td.link_state || '';
+    t.linkFlipAt = td.link_flip_at || 0;
+    t.linkNote = td.link_note || '';
+    t.created_at = td.created_at || null;
+    t.updated_at = td.updated_at || null;
+    t.logs = Array.isArray(td.logs) ? td.logs.slice() : [];
+
+    tasks.set(t.task_id, t);
+    t.el = createTaskEl(t);
+    els.taskList.appendChild(t.el.wrap);
+    renderRow(t);
+  }
+  updateCounters();
+}
+
+/* --------------------------- job actions --------------------------- */
+
+function attachJob(jobId) {
+  state.jobId = jobId;
+  state.running = true;
+  state.stopping = false;
+  setJobBadge(jobId);
+  markCurrentJob();
+  // Bắt đầu theo dõi job -> quay về tab "Tất cả" trước khi đổ task vào.
+  // Không làm bước này thì task mới (pending/running) nằm đúng hàng nhưng bị bộ
+  // lọc cũ che hết: bấm Chạy xong list trông như trống, phải F5 mới thấy — vì
+  // state.filter không lưu vào localStorage nên F5 luôn quay về 'all'.
+  setFilter('all');
+  setSubmitState();
+  tasks.clear();
+  els.taskList.innerHTML = '';
+  els.emptyState.hidden = true;
+  updateCounters();
+  connectES(jobId);
+  loadState(jobId);
+}
+
+async function runJob() {
+  const tokens = getTokens();
+  if (!tokens.length) return;
+  if (tokens.length > MAX_TOKENS) {
+    toast('Max ' + MAX_TOKENS + ' tokens / batch.');
+    return;
+  }
+  const w = readWorkers();
+  const workers = w.value;
+  if (w.clamped) toast('Workers capped at ' + MAX_WORKERS + ' — you asked for ' + w.raw + '.');
+  const retriesInput = parseInt(els.retries.value, 10);
+  const retries = Math.max(0, Math.min(5, Number.isNaN(retriesInput) ? 1 : retriesInput));
+  const payload = {
+    tokens: tokens.join('\n'),
+    mode: state.mode,
+    country: els.country.value.trim() || 'IN',
+    promo: els.promo.value,
+    workers,
+    retries,
+    proxies: els.useProxy.checked ? getProxies() : null,
+    min_score: els.useFilter.checked ? (parseInt(els.minScore.value, 10) || 0) : 0,
+  };
+
+  state.tokens = tokens.slice();
+  state.running = true;
+  // Đánh dấu đang "chuẩn bị": server sẽ quét + lọc pool proxy trước khi tạo job
+  // (nếu bật "Chỉ dùng proxy sạch"), khoảng này có thể kéo dài cả phút mà trước đây
+  // không có bất kỳ phản hồi nào -> user tưởng đứng máy. Hiện banner chạy giây.
+  state.starting = true;
+  state.startingAt = Date.now();
+  setSubmitState();
+  updateQueueLoading();
+
+  let data;
+  try {
+    const res = await fetch('/api/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      let msg = 'Failed to start job';
+      try { const j = await res.json(); if (j.detail) msg = j.detail; } catch (e) { /* ignore */ }
+      throw new Error(msg);
+    }
+    data = await res.json();
+  } catch (err) {
+    state.starting = false;
+    state.running = false;
+    setSubmitState();
+    updateQueueLoading();
+    toast(err.message || 'Failed to start job');
+    return;
+  }
+  state.starting = false;
+  attachJob(data.job_id);
+}
+
+async function stopJob() {
+  if (!state.jobId || state.stopping) return;
+  const jid = state.jobId;
+  try {
+    const res = await fetch('/api/stop/' + jid, { method: 'POST' });
+    if (!res.ok) {
+      let message = 'Could not stop job';
+      try { const body = await res.json(); if (body.detail) message = body.detail; } catch (e) { /* ignore */ }
+      toast(message);
+      return;
+    }
+  } catch (e) {
+    toast('Connection lost sending stop request');
+    return;
+  }
+  if (!state.running) return;
+  state.stopping = true;
+  setSubmitState();
+  toast('Stopping · running tasks finish first');
+}
+
+async function retryTask(t) {
+  if (!state.jobId) return;
+  try {
+    const res = await fetch('/api/retry/' + state.jobId + '/' + t.task_id, { method: 'POST' });
+    if (!res.ok) { toast('Retry failed'); return; }
+  } catch (e) {
+    toast('Retry failed');
+    return;
+  }
+  // task_init/task_start SSE events reset the row from server state.
+}
+
+async function removeTask(t) {
+  const who = t.email || t.task_id;
+  const okRemove = await confirmDialog({
+    title: 'Remove this task?',
+    text: who + '\nAlso deletes the server copy. Cannot be undone.',
+    okLabel: 'Remove task',
+  });
+  if (!okRemove) return;
+  // Phải gọi server trước: trước đây chỉ `.remove()` phần tử DOM nên F5 là task
+  // quay lại nguyên vẹn — server chưa hề biết.
+  if (state.jobId) {
+    try {
+      const res = await fetch('/api/remove/' + state.jobId + '/' + t.task_id, { method: 'POST' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        toast(data.detail || 'Could not remove task');
+        return;
+      }
+    } catch (e) {
+      toast('Connection lost removing task');
+      return;
+    }
+  }
+  if (t.el && t.el.wrap) t.el.wrap.remove();
+  if (t._monitor) { clearInterval(t._monitor); t._monitor = null; }
+  tasks.delete(t.task_id);
+  updateCounters();
+  toast('Removed 1 task');
+}
+
+/* ------------------------- persistence (localStorage) ---------------- */
+// Tu dong luu form -> refresh trang khong mat token / proxy / cau hinh.
+// LUU Y: luu dang plaintext trong localStorage cua browser (token la credential).
+
+const STORE_KEY = 'upi-web-form-v1';
+
+function saveForm() {
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify({
+      tokens: els.tokens.value,
+      proxies: els.proxies.value,
+      useProxy: els.useProxy.checked,
+      mode: state.mode,
+      country: els.country.value,
+      promo: els.promo.value,
+      workers: els.workers.value,
+      retries: els.retries.value,
+      view: state.view,
+      useFilter: els.useFilter.checked,
+      minScore: els.minScore.value,
+    }));
+  } catch (e) { /* localStorage bi chan / day -> bo qua */ }
+}
+
+function loadForm() {
+  let saved;
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (!raw) return false;
+    saved = JSON.parse(raw);
+  } catch (e) {
+    return false;
+  }
+  if (!saved || typeof saved !== 'object') return false;
+
+  if (typeof saved.tokens === 'string') els.tokens.value = saved.tokens;
+  if (typeof saved.proxies === 'string') els.proxies.value = saved.proxies;
+  els.useProxy.checked = !!saved.useProxy;
+  els.proxies.hidden = !els.useProxy.checked;
+  if (saved.country) els.country.value = saved.country;
+  // Chỉ nhận promo còn tồn tại trong <select>: giá trị đã lưu mà option đã bị bỏ
+  // (vd 'trial' vừa xoá) sẽ làm select rỗng -> gửi PP_PROMO_MODE="" xuống
+  // extract_cs, mà ở đó chuỗi rỗng lại fallback thành "campaign" — tức là âm thầm
+  // bật promo trong khi user tưởng đang để off.
+  if (saved.promo && [...els.promo.options].some(o => o.value === saved.promo)) {
+    els.promo.value = saved.promo;
+  }
+  if (saved.workers) els.workers.value = saved.workers;
+  if (saved.retries != null) els.retries.value = saved.retries;
+  if (saved.view === 'grid' || saved.view === 'list') state.view = saved.view;
+  els.useFilter.checked = !!saved.useFilter;
+  if (saved.minScore != null) els.minScore.value = saved.minScore;
+  if (saved.mode) setMode(saved.mode);
+
+  updatePoolStatus();
+  return true;
+}
+
+function updatePoolStatus() {
+  const n = els.proxies.value.split('\n').map(s => s.trim()).filter(Boolean).length;
+  els.poolStatus.hidden = !(els.useProxy.checked && n > 0);
+  els.poolCount.textContent = n + ' proxy trong pool';
+}
+
+/* ---------------------- quét proxy (sạch / risk thấp) ---------------- */
+
+function gradeClass(g) {
+  return 'grade grade-' + String(g || 'f').toLowerCase();
+}
+
+function renderScanResult(data) {
+  const g = data.grades || {};
+  const usable = data.usable || 0;
+  const min = parseInt(els.minScore.value, 10) || 0;
+  const pass = (data.results || []).filter(r => r.ok && r.score >= min).length;
+
+  let html = '<div class="scan-head">' +
+    '<span><b>' + usable + '/' + data.total + '</b> usable proxies (right country)</span>' +
+    '<span class="muted">A ' + (g.A || 0) + ' · B ' + (g.B || 0) + ' · C ' + (g.C || 0) +
+    ' · F ' + (g.F || 0) + '</span></div>';
+
+  html += '<div class="scan-head"><span>Passing <b>' + esc(min) + '</b>: <b>' +
+    pass + '</b> proxy</span></div>';
+
+  html += '<div class="scan-table">';
+  (data.results || []).slice(0, 50).forEach((r, i) => {
+    const flags = (r.flags || []).map(f => '<span class="flag">' + esc(f) + '</span>').join(' ');
+    const ok = r.ok && r.score >= min;
+    html += '<div class="scan-item' + (ok ? '' : ' scan-item-off') + '">' +
+      '<div class="scan-line1">' +
+        '<span class="muted scan-rank">#' + (i + 1) + '</span>' +
+        '<span class="' + gradeClass(r.grade) + '">' + esc(r.score) + ' ' + esc(r.grade) + '</span>' +
+        '<span class="scan-flags">' + (flags || '<span class="muted">clean</span>') + '</span>' +
+      '</div>' +
+      '<div class="scan-line2 mono">' + esc(r.ip || '—') +
+        ' <span class="muted">' + esc(r.country || '') + (r.ip_type ? ' ' + esc(r.ip_type) : '') + '</span>' +
+        (r.latency_ms ? ' <span class="muted">· ' + esc(r.latency_ms) + 'ms</span>' : '') +
+      '</div>' +
+      (r.org ? '<div class="scan-line3 muted" title="' + esc(r.org) + '">' + esc(r.org) + '</div>' : '') +
+      '</div>';
+  });
+  html += '</div>';
+  els.scanResult.innerHTML = html;
+  els.scanResult.hidden = false;
+}
+
+async function scanProxies() {
+  const pool = getProxies();
+  if (!pool) { toast('No proxies to scan'); return; }
+  els.poolScan.disabled = true;
+  els.poolScan.textContent = 'Scanning…';
+  try {
+    const res = await fetch('/api/scan-proxies', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ proxies: pool, country: els.country.value || 'IN', workers: 12 }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'scan failed');
+    renderScanResult(data);
+    const min = parseInt(els.minScore.value, 10) || 0;
+    const pass = (data.results || []).filter(r => r.ok && r.score >= min).length;
+    toast('Scan done: ' + pass + '/' + data.total + ' proxies ≥' + min);
+  } catch (e) {
+    toast('Scan failed: ' + (e.message || e));
+  } finally {
+    els.poolScan.disabled = false;
+    els.poolScan.textContent = 'Scan pool';
+  }
+}
+
+/* ----------------------------- init -------------------------------- */
+
+function bindEvents() {
+  els.tokens.addEventListener('input', () => {
+    updateTokenCount();
+    saveForm();
+  });
+  els.useProxy.addEventListener('change', () => {
+    els.proxies.hidden = !els.useProxy.checked;
+    updatePoolStatus();
+    saveForm();
+  });
+  els.proxies.addEventListener('input', () => {
+    updatePoolStatus();
+    saveForm();
+  });
+  els.poolClear.addEventListener('click', () => {
+    els.proxies.value = '';
+    updatePoolStatus();
+    saveForm();
+    toast('Proxy pool cleared');
+  });
+  els.poolScan.addEventListener('click', scanProxies);
+  els.useFilter.addEventListener('change', saveForm);
+  els.minScore.addEventListener('input', saveForm);
+  els.country.addEventListener('input', saveForm);
+  els.promo.addEventListener('change', saveForm);
+  els.workers.addEventListener('input', () => { saveForm(); updateTokenCount(); });
+  els.retries.addEventListener('input', saveForm);
+  document.querySelectorAll('.view-option').forEach(b => {
+    b.addEventListener('click', () => setView(b.dataset.view));
+  });
+  document.querySelectorAll('.seg').forEach(b => {
+    b.addEventListener('click', () => setMode(b.dataset.mode));
+  });
+  document.querySelectorAll('.tab').forEach(b => {
+    b.addEventListener('click', () => setFilter(b.dataset.filter));
+  });
+
+  // 每个 tab 上的 ✕：清掉该 tab 的 task（同时删服务端已存的，不然刷新又回来）
+  document.querySelectorAll('.tab-clear').forEach(span => {
+    span.addEventListener('click', (ev) => {
+      ev.stopPropagation();          // 别顺手把 tab 也切了
+      ev.preventDefault();
+      clearTab(span.dataset.clear, span);
+    });
+    span.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); span.click(); }
+    });
+  });
+  els.btnSuccess.addEventListener('click', () => {
+    setFilter(state.filter === 'success' ? 'all' : 'success');
+  });
+  els.btnRefresh.addEventListener('click', () => {
+    if (state.jobId) {
+      loadState(state.jobId);
+      toast('Refreshed');
+    }
+  });
+  els.btnClearTab.addEventListener('click', () => clearTab(state.filter, els.btnClearTab));
+  els.btnNotify.addEventListener('click', toggleNotify);
+  // Xem lịch sử job bất kỳ: gõ/dán id rồi Enter hoặc bấm "Xem"
+  els.jobIdInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); loadJobById(els.jobIdInput.value); }
+  });
+  els.jobIdInput.addEventListener('input', () => els.jobIdInput.classList.remove('bad'));
+  els.jobIdLoad.addEventListener('click', () => loadJobById(els.jobIdInput.value));
+  els.jobIdInput.addEventListener('focus', fillJobIdList);
+  // Bấm 1 dòng lịch sử = nạp job đó (điền luôn vào ô Job ID cho khỏi bỡ ngỡ).
+  els.historyList.addEventListener('click', (e) => {
+    const row = e.target.closest('.history-row');
+    if (!row) return;
+    els.jobIdInput.value = row.dataset.job;
+    loadJobById(row.dataset.job);
+  });
+  els.submit.addEventListener('click', () => {
+    if (state.running) stopJob();
+    else runJob();
+  });
+}
+
+async function init() {
+  const restored = loadForm();
+  bindEvents();
+  bindModal();
+  state.tokens = getTokens();
+  document.body.dataset.filter = state.filter;
+  setView(state.view, false);
+  if (!restored) setMode('auto');
+  setJobBadge(null);
+  setNotify(notifyOn());
+  updateTokenCount();
+  updatePoolStatus();
+  updateCounters();
+  updateEmptyState();
+  if (restored && getTokens().length) toast('Restored saved form');
+
+  // Auto-attach to the newest running job if one exists.
+  try {
+    const res = await fetch('/api/jobs');
+    if (res.ok) {
+      const data = await res.json();
+      renderJobHistory(data.jobs || []);
+      const running = (data.jobs || []).filter(j => j.status === 'running');
+      const latest = running[running.length - 1] || (data.jobs || [])[0];
+      if (latest) attachJob(latest.job_id);
+    }
+  } catch (e) {
+    // Backend not reachable — stay on the empty state.
+  }
+}
+
+document.addEventListener('DOMContentLoaded', init);

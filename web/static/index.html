@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UPI Checkout</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app">
+    <!-- ===================== LEFT SIDEBAR ===================== -->
+    <aside class="sidebar">
+
+      <div class="sidebar-brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="m8 10 4-2.3 4 2.3v4l-4 2.3L8 14v-4Z" fill="currentColor"/></svg>
+        </div>
+        <div class="brand-copy"><strong>UPI Checkout</strong><span>Batch control center</span></div>
+      </div>
+
+      <!-- Job pill: xem được lịch sử của bất kỳ job nào bằng cách dán job id -->
+      <div class="job-pill">
+        <label class="job-pill-label" for="job-id-input">Job ID</label>
+        <div class="job-pill-line">
+          <input id="job-id-input" class="job-pill-input mono" placeholder="paste job id + Enter"
+                 maxlength="12" spellcheck="false" autocomplete="off" list="job-id-list">
+          <datalist id="job-id-list"></datalist>
+          <button type="button" class="btn-mini" id="job-id-load" title="Load this job's history">Load</button>
+        </div>
+      </div>
+
+      <!-- Queue stats -->
+      <div class="queue-stats">
+        <div class="qstat is-running"><span class="qstat-num" id="stat-running">0</span><span class="qstat-label">running</span></div>
+        <div class="qstat"><span class="qstat-num" id="stat-queued">0</span><span class="qstat-label">queued</span></div>
+        <div class="qstat is-ok"><span class="qstat-num" id="stat-success">0</span><span class="qstat-label">success</span></div>
+        <div class="qstat is-fail"><span class="qstat-num" id="stat-fail">0</span><span class="qstat-label">failed</span></div>
+        <div class="qstat is-stop"><span class="qstat-num" id="stat-stopped">0</span><span class="qstat-label">stopped</span></div>
+      </div>
+
+      <!-- Overall progress -->
+      <div class="overall">
+        <div class="progress-head">
+          <span class="muted">Queue progress</span>
+          <span class="pct" id="overall-pct">0%</span>
+        </div>
+        <div class="progressbar" id="overall-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Queue progress">
+          <div class="fill" id="overall-fill"></div>
+        </div>
+        <div class="overall-count" id="overall-count">0/0 done · 0 running · 0 queued</div>
+      </div>
+
+      <!-- Access tokens -->
+      <div class="section">
+        <label class="section-label" for="tokens">Access tokens</label>
+        <textarea id="tokens" class="tokens-input mono" rows="10" placeholder="eyJhbGciOiJ..." spellcheck="false"></textarea>
+        <div class="helper">One access token per line. Max 1000 tokens / batch.</div>
+        <div class="token-count" id="token-count">0 tokens detected</div>
+      </div>
+
+      <!-- Payment method -->
+      <div class="section">
+        <label class="section-label" for="payment-method">Payment method</label>
+        <select id="payment-method" disabled>
+          <option>UPI</option>
+        </select>
+      </div>
+
+      <!-- Backend flow -->
+      <div class="section">
+        <span class="section-label">Backend flow</span>
+        <div class="segmented" role="radiogroup" aria-label="Backend flow">
+          <button type="button" class="seg active" data-mode="auto" role="radio" aria-checked="true">Auto-detect</button>
+          <button type="button" class="seg" data-mode="oaics" role="radio" aria-checked="false">OAICS (open_ai)</button>
+          <button type="button" class="seg" data-mode="cs" role="radio" aria-checked="false">CS (stripe)</button>
+        </div>
+        <div class="hint" id="mode-hint"></div>
+      </div>
+
+      <!-- Proxy pool -->
+      <div class="section card">
+        <label class="checkbox-row">
+          <input type="checkbox" id="use-proxy">
+          <span>Use custom proxy pool</span>
+        </label>
+        <div class="helper">Defaults to upi-checkout/proxy.txt. Enable to paste your own pool.</div>
+        <textarea id="proxies" class="proxies-input mono" rows="4" placeholder="http://user:pass@host:port" spellcheck="false" hidden></textarea>
+        <div class="pool-status" id="pool-status" hidden>
+          <span id="pool-count">0 proxy</span>
+          <span class="pool-actions">
+            <button type="button" class="btn-mini" id="pool-scan">Scan pool</button>
+            <button type="button" class="btn-mini" id="pool-clear">Clear pool</button>
+          </span>
+        </div>
+
+        <!-- Lọc proxy sạch / risk thấp trước khi chạy -->
+        <div class="proxy-filter" id="proxy-filter">
+          <label class="checkbox-row">
+            <input type="checkbox" id="use-filter">
+            <span>Clean proxies only (low risk)</span>
+          </label>
+          <div class="field-inline">
+            <label for="min-score">Min score</label>
+            <input id="min-score" type="number" value="75" min="0" max="100" step="5">
+            <span class="muted" id="min-score-hint">A ≥75 · B ≥55 · C ≥35</span>
+          </div>
+          <div class="helper">Workers test proxies on demand — only proxies above the threshold get used, so the job starts right away.</div>
+        </div>
+
+        <div class="scan-result" id="scan-result" hidden></div>
+      </div>
+
+      <!-- Advanced config -->
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <div class="advanced-body">
+          <div class="field">
+            <label for="country">Country</label>
+            <input id="country" type="text" value="IN">
+          </div>
+          <div class="field">
+            <label for="promo">Promo</label>
+            <select id="promo">
+              <option value="off" selected>off — full price</option>
+              <option value="campaign">plus-1-month-free</option>
+            </select>
+            <span class="helper">
+              Sends <code>promo_campaign.promo_campaign_id = "plus-1-month-free"</code>
+              then <code>POST /checkout/update</code> to pull the amount down to 0.
+              <br><b>Do not change this value</b> — it is <code>PP_PROMO_MODE</code>,
+              passed down to extract_cs; only <code>campaign</code> matches the promo
+              branch. The promo id lives in <code>PP_PROMO_ID</code> and is fixed.
+            </span>
+          </div>
+          <div class="field">
+            <label for="workers">Concurrent workers</label>
+            <input id="workers" type="number" value="4" min="1" max="64">
+            <span class="helper">1–64. Each worker ≈ 70 MB RAM.</span>
+          </div>
+          <div class="field">
+            <label for="retries">Retries on failure</label>
+            <input id="retries" type="number" value="1" min="0" max="5">
+            <span class="helper">Applies to task retries and the internal CS retry cap. 0 disables task retry.</span>
+          </div>
+        </div>
+      </details>
+
+      <!-- Summary -->
+      <div class="summary-box">
+        <div id="summary-tasks">0 tasks × 1 use each</div>
+        <div class="summary-total" id="summary-total">Total uses: 0</div>
+      </div>
+
+      <!-- Warning -->
+      <div class="warning" id="warning" hidden></div>
+
+      <!-- Submit / stop -->
+      <button type="button" class="submit" id="submit" disabled>Run 0 checkout tasks</button>
+
+      <!-- Lịch sử job: server giữ file kết quả trên đĩa nên mở lại được job cũ
+           (kể cả job đã chết vì restart). Bấm 1 dòng = nạp job đó vào bảng bên phải. -->
+      <details class="history" id="history-box">
+        <summary>
+          <span>Job history</span>
+          <span class="history-count" id="history-count">0</span>
+        </summary>
+        <div class="history-list" id="history-list">
+          <div class="history-empty">Loading…</div>
+        </div>
+      </details>
+    </aside>
+
+    <!-- ===================== RIGHT TASK LIST ===================== -->
+    <main class="main">
+      <!-- Panel header -->
+      <div class="panel-head">
+        <div class="panel-title">
+          <span class="panel-kicker">CONTROL PANEL</span>
+          <h1>Checkout progress</h1>
+          <p class="panel-sub">Live over SSE — no refresh needed</p>
+        </div>
+        <div class="panel-actions">
+          <button type="button" class="btn-ghost" id="btn-success">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
+            Success results
+          </button>
+          <button type="button" class="btn-ghost" id="btn-clear-tab" title="Remove every task in the open tab — also deletes the server copy">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
+            <span id="btn-clear-tab-label">Clear tab</span>
+          </button>
+          <button type="button" class="btn-ghost" id="btn-notify" title="Sound when a task yields a QR link or the customer approves">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg>
+            <span id="btn-notify-label">Sound</span>
+          </button>
+          <button type="button" class="btn-ghost" id="btn-refresh">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.5 9a7 7 0 0 1 12-2L20 12M4 12l2.5 5a7 7 0 0 0 12-2"/></svg>
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      <!-- Queue filter tabs -->
+      <div class="queue-toolbar">
+        <div class="tabs" role="tablist" aria-label="Filter by status">
+          <button type="button" class="tab active" data-filter="all" role="tab" aria-selected="true">All <span class="tab-count" id="c-all">0</span><span class="tab-clear" data-clear="all" role="button" tabindex="0" title="Remove tasks in this tab">✕</span></button>
+          <button type="button" class="tab" data-filter="running" role="tab" aria-selected="false">Running <span class="tab-count" id="c-running">0</span><span class="tab-clear" data-clear="running" role="button" tabindex="0" title="Remove tasks in this tab">✕</span></button>
+          <button type="button" class="tab" data-filter="queued" role="tab" aria-selected="false">Queued <span class="tab-count" id="c-queued">0</span><span class="tab-clear" data-clear="queued" role="button" tabindex="0" title="Remove tasks in this tab">✕</span></button>
+          <button type="button" class="tab" data-filter="success" role="tab" aria-selected="false">Success <span class="tab-count" id="c-success">0</span><span class="tab-clear" data-clear="success" role="button" tabindex="0" title="Remove tasks in this tab">✕</span></button>
+          <button type="button" class="tab" data-filter="fail" role="tab" aria-selected="false">Failed <span class="tab-count" id="c-fail">0</span><span class="tab-clear" data-clear="fail" role="button" tabindex="0" title="Remove tasks in this tab">✕</span></button>
+          <button type="button" class="tab" data-filter="stopped" role="tab" aria-selected="false">Stopped <span class="tab-count" id="c-stopped">0</span><span class="tab-clear" data-clear="stopped" role="button" tabindex="0" title="Remove tasks in this tab">✕</span></button>
+        </div>
+        <div class="view-toggle" role="group" aria-label="Success result layout">
+          <button type="button" class="view-option active" data-view="list" aria-label="List view" aria-pressed="true" title="List">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>
+          </button>
+          <button type="button" class="view-option" data-view="grid" aria-label="QR grid view" aria-pressed="false" title="QR grid">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="empty-state" id="empty-state">
+        <svg width="128" height="128" viewBox="0 0 128 128" fill="none" aria-hidden="true">
+          <g fill="#26332e">
+            <rect x="10" y="10" width="36" height="36" rx="4"/>
+            <rect x="82" y="10" width="36" height="36" rx="4"/>
+            <rect x="10" y="82" width="36" height="36" rx="4"/>
+          </g>
+          <g fill="#151918">
+            <rect x="18" y="18" width="20" height="20" rx="3"/>
+            <rect x="90" y="18" width="20" height="20" rx="3"/>
+            <rect x="18" y="90" width="20" height="20" rx="3"/>
+          </g>
+          <g fill="#48d5a0">
+            <rect x="27" y="27" width="4" height="4"/>
+            <rect x="99" y="27" width="4" height="4"/>
+            <rect x="27" y="99" width="4" height="4"/>
+          </g>
+          <g fill="#26332e">
+            <rect x="52" y="12" width="6" height="6"/><rect x="62" y="12" width="6" height="6"/><rect x="72" y="12" width="6" height="6"/>
+            <rect x="12" y="52" width="6" height="6"/><rect x="12" y="62" width="6" height="6"/><rect x="12" y="72" width="6" height="6"/>
+            <rect x="52" y="52" width="6" height="6"/><rect x="62" y="52" width="6" height="6"/><rect x="72" y="62" width="6" height="6"/>
+            <rect x="52" y="72" width="6" height="6"/><rect x="62" y="72" width="6" height="6"/>
+            <rect x="88" y="52" width="6" height="6"/><rect x="88" y="62" width="6" height="6"/><rect x="108" y="52" width="6" height="6"/><rect x="108" y="62" width="6" height="6"/>
+            <rect x="52" y="88" width="6" height="6"/><rect x="62" y="88" width="6" height="6"/><rect x="72" y="88" width="6" height="6"/>
+            <rect x="52" y="108" width="6" height="6"/><rect x="62" y="108" width="6" height="6"/>
+            <rect x="88" y="88" width="6" height="6"/><rect x="98" y="88" width="6" height="6"/><rect x="108" y="88" width="6" height="6"/>
+          </g>
+        </svg>
+        <h2>No tasks yet</h2>
+        <p>Paste access tokens on the left, then run to start extracting UPI QR links.</p>
+      </div>
+      <div class="list-empty" id="list-empty" hidden></div>
+      <div class="queue-loading" id="queue-loading" hidden>
+        <div class="queue-loading-text" id="queue-loading-text">Filling queue…</div>
+        <div class="queue-loading-bar"><div class="queue-loading-fill" id="queue-loading-fill"></div></div>
+      </div>
+      <div class="task-list" id="task-list"></div>
+    </main>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <!-- Âm báo khi task ra link QR / khách quét uỷ nhiệm. preload để tiếng kêu
+       không bị trễ ở lần đầu; file nằm cùng /static nên không phụ thuộc mạng. -->
+  <audio id="notify-audio" src="/static/notify.mp3" preload="auto"></audio>
+
+  <!-- Hộp thoại xác nhận của app, thay cho confirm() mặc định của browser:
+       confirm() chặn cả luồng JS, không tạo kiểu được, và trên vài browser bị
+       chặn/hiện như tab lạ. Markup này chỉ là khung, nội dung do app.js đổ vào. -->
+  <div class="modal-backdrop" id="modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <h3 class="modal-title" id="modal-title"></h3>
+      <p class="modal-text" id="modal-text"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn-ghost" id="modal-cancel">Cancel</button>
+        <button type="button" class="btn-modal-ok" id="modal-ok">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
