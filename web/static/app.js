@@ -465,12 +465,6 @@ function artifactHtml(t) {
   return html + '</div>';
 }
 
-function logsHtml(t) {
-  if (!t.logs || !t.logs.length) return '';
-  const lines = t.logs.slice(-400);
-  return '<details class="logs"><summary>Logs (' + t.logs.length + ')</summary><pre>' + esc(lines.join('\n')) + '</pre></details>';
-}
-
 /* --------------------------- rendering ----------------------------- */
 
 // Build a task's row + detail container once and cache the row refs.
@@ -1144,9 +1138,6 @@ function renderDetailIfOpen(t) {
 
 function renderDetail(t) {
   if (!t.el) return;
-  // Preserve the logs <details> open state across rebuilds.
-  const logsOpen = t.el.detail.querySelector('details.logs') != null &&
-                   t.el.detail.querySelector('details.logs').open;
 
   const pct = taskProgress(t);
   let finished = 0;
@@ -1182,11 +1173,7 @@ function renderDetail(t) {
     flowCardHtml(t) +
     '<div class="step-grid">' + stepsHtml + '</div>' +
     artifactHtml(t) +
-    logsHtml(t) +
     '<div class="detail-footer muted">Created ' + esc(t.created_at || '—') + ' · Updated ' + esc(t.updated_at || '—') + '</div>';
-
-  const logs = t.el.detail.querySelector('details.logs');
-  if (logsOpen && logs) logs.open = true;
 
   t.el.detail.querySelector('.btn-retry').addEventListener('click', () => retryTask(t));
   t.el.detail.querySelector('.btn-remove').addEventListener('click', () => removeTask(t));
@@ -1641,7 +1628,6 @@ function handleEvent(evt) {
     case 'task_flow': onTaskFlow(evt); break;
     case 'step': onStep(evt); break;
     case 'egress': onEgress(evt); break;
-    case 'log': onLog(evt); break;
     case 'task_artifact': onArtifact(evt); break;
     case 'task_link': onTaskLink(evt); break;
     case 'task_done': onTaskDone(evt); break;
@@ -1756,20 +1742,6 @@ function onProxyQuality(evt) {
   if (g.verified) parts.push('sinh bù ' + g.verified + ' proxy mới (' + g.sess_minutes + ' phút)');
   else if (evt.excluded) parts.push('loại ' + evt.excluded);
   if (parts.length) toast('Pool proxy: ' + parts.join(' · '));
-}
-
-function onLog(evt) {
-  // Log cấp JOB (task_id == "*": "== stop requested ==", "proxy gate …") không thuộc
-  // task nào. Trước đây ensureTask("*") tạo ra một task MA không có email/token,
-  // nằm mãi trong tab "Đang chờ" và gom hết log cấp job (thấy 391 dòng ở đó).
-  // Bỏ qua ở đây; các dòng này vẫn đầy đủ trong logs/web_<job>.log trên đĩa.
-  if (evt.task_id === '*') return;
-  const t = ensureTask(evt.task_id);
-  if (typeof evt.line === 'string') {
-    t.logs.push(evt.line);
-    if (t.logs.length > 1000) t.logs = t.logs.slice(-1000);
-  }
-  renderDetailIfOpen(t);
 }
 
 // Server dò link ở NỀN và đẩy xuống đây mỗi khi trạng thái đổi (khách quét được /

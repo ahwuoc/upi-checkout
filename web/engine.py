@@ -790,9 +790,11 @@ def _mk_hooks(job: Job, task: Task):
         job.emit(ev)
 
     def on_log(line: str) -> None:
+        # Chỉ giữ lại đuôi ngắn cho banner lỗi (failReason) — KHÔNG còn đẩy từng dòng
+        # lên web nữa: panel log đã bỏ khỏi UI. Toàn bộ log vẫn nằm trong
+        # logs/web_<job>.log (job) và logs/upi_<ts>.log (extract_cs tự ghi).
         if len(task.logs) < MAX_LOGS_PER_TASK:
             task.logs.append(line[:500])
-        job.emit({"type": "log", "task_id": task.task_id, "line": line[:500]})
 
     def on_geo(info: dict) -> None:
         loc = ", ".join(p for p in (info.get("city"), info.get("region"), "IN") if p)

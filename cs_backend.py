@@ -25,7 +25,6 @@ request context.
 
 from __future__ import annotations
 
-import contextlib
 import io
 import threading
 import time
@@ -33,10 +32,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-
 LineCallback = Callable[[str], None]
 StopCallback = Callable[[], bool]
-
 
 @dataclass
 class BackendResult:
@@ -53,7 +50,6 @@ class BackendResult:
     timed_out: bool = False
     error: str = ""
     data: dict = field(default_factory=dict)
-
 
 class _LineWriter(io.TextIOBase):
     """Text stream used for legacy marker prints while the flow is embedded."""
@@ -87,11 +83,8 @@ class _LineWriter(io.TextIOBase):
         if self._callback is not None:
             self._callback(clean)
 
-
 # ``extract_cs`` has process-global mutable state (notably _proxy_state and the
 # redaction set).  Serialising in-process calls avoids cross-account leakage.
-_RUN_LOCK = threading.RLock()
-
 
 def _env_values(token: str, proxy_path: Path, state_file: Path, promo: str,
                 retry_limit: int | None, country: str) -> dict[str, str]:
@@ -126,7 +119,6 @@ def _env_values(token: str, proxy_path: Path, state_file: Path, promo: str,
         })
     return values
 
-
 def _reset_extract_state(module: object, state_file: Path) -> None:
     """Reset request-scoped globals before invoking an imported extract module."""
 
@@ -138,7 +130,6 @@ def _reset_extract_state(module: object, state_file: Path) -> None:
         return
     with lock:
         setattr(module, "_proxy_state", None)
-
 
 def run_in_process(
     token: str,
@@ -194,20 +185,19 @@ def run_in_process(
                 extract_cs.log("access_token is empty", "[ERROR] ")
                 return
             proxy_seeds = extract_cs.load_proxy_file(proxy_path)
-            # `execution_context` keeps token/config/log state request-local;
-            # redirect_stdout only catches legacy marker prints from the
-            # protocol implementation. The run lock makes that legacy stream
-            # safe while those prints are being migrated to emit_result().
+            # `execution_context` keeps token/config/log state request-local.
+            # Các marker trước đây in bằng print() đã chuyển sang emit_output(),
+            # nên KHÔNG cần redirect_stdout (vốn là global của cả process) nữa —
+            # nhờ vậy nhiều task CS chạy song song trong cùng 1 interpreter được.
             with extract_cs.execution_context(
                     values, on_output=lambda line: writer.write(line + "\n"),
                     on_result=on_result, should_stop=should_stop, timeout=timeout):
-                with contextlib.redirect_stdout(writer):
-                    result.exit_code = extract_cs.run_single_link_mode(
-                        access_token,
-                        session_token,
-                        proxy_seeds,
-                        stop_event=stop_event,
-                    )
+                result.exit_code = extract_cs.run_single_link_mode(
+                    access_token,
+                    session_token,
+                    proxy_seeds,
+                    stop_event=stop_event,
+                )
         except BaseException as exc:  # report to the caller; never leak a thread
             worker_error.append(exc)
             result.error = str(exc)[:300]
@@ -215,18 +205,19 @@ def run_in_process(
         finally:
             writer.flush()
 
-    with _RUN_LOCK:
-        thread = threading.Thread(target=worker, name=f"cs-backend-{idx}", daemon=False)
-        thread.start()
-        while thread.is_alive():
-            if should_stop is not None and should_stop():
-                result.stopped = True
-                stop_event.set()
-            if timeout > 0 and time.monotonic() - started >= timeout:
-                result.timed_out = True
-                stop_event.set()
-            time.sleep(0.1)
-        thread.join()
+    # Mỗi task CS chạy trên một worker thread riêng; state của từng task nằm trong
+    # execution_context (thread-local) nên không cần khoá toàn cục nữa.
+    thread = threading.Thread(target=worker, name=f"cs-backend-{idx}", daemon=False)
+    thread.start()
+    while thread.is_alive():
+        if should_stop is not None and should_stop():
+            result.stopped = True
+            stop_event.set()
+        if timeout > 0 and time.monotonic() - started >= timeout:
+            result.timed_out = True
+            stop_event.set()
+        time.sleep(0.1)
+    thread.join()
 
     result.lines = lines
     if worker_error and not result.error:
@@ -275,6 +266,5 @@ def run_in_process(
     except Exception as exc:  # keep a backend result even if classification fails
         result.data = {"status": "ERROR", "err": result.error or str(exc)[:240]}
     return result
-
 
 __all__ = ["BackendResult", "run_in_process"]

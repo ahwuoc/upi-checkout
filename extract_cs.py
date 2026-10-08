@@ -1368,7 +1368,11 @@ def dump_http(
     request_url: str = "",
     force: bool = False,
 ) -> None:
-    if not force and not env_bool("UPI_DUMP", False):
+    # MẶC ĐỊNH TẮT: mọi dump (kể cả force=True) đều chỉ ghi khi UPI_DUMP=1.
+    # Trước đây 12 chỗ `force=True` (approve/poll/redirect/confirm) ghi không cần
+    # cờ -> dumps/ phình tới 833MB chỉ sau vài job. Nay force chỉ còn là ghi chú
+    # "quan trọng", không còn vượt được công tắc master.
+    if not env_bool("UPI_DUMP", False):
         return
     global _dump_counter
     with _dump_lock:
@@ -3123,8 +3127,8 @@ def resolve_confirm_payload_upi(
             }
             fp = SCRIPT_DIR / f"upi_before_approve_{time.strftime('%Y%m%d-%H%M%S')}.json"
             fp.write_text(json.dumps(artifact, ensure_ascii=False, indent=2))
-            print(f"BEFORE_APPROVE_READY: {fp}", flush=True)
-            print(json.dumps(artifact, ensure_ascii=False), flush=True)
+            emit_output(f"BEFORE_APPROVE_READY: {fp}", flush=True)
+            emit_output(json.dumps(artifact, ensure_ascii=False), flush=True)
             raise SystemExit(0)
         approve_proxies = approve_proxy_candidates(checkout_proxy, provider_proxy, approve_pool)
         log("needs approve: UPI 0-value path; prefer previously-successful/current provider proxy, then rotate to next provider proxy.")
@@ -3153,8 +3157,8 @@ def emit_hosted_url_marker(hosted_url: str) -> None:
     """
     if not hosted_url:
         return
-    print("\n===== HOSTED CHECKOUT URL =====")
-    print(f"UPI hosted checkout URL:\n{hosted_url}")
+    emit_output("\n===== HOSTED CHECKOUT URL =====")
+    emit_output(f"UPI hosted checkout URL:\n{hosted_url}")
 
 
 def emit_qr_marker(qr_urls: list[str]) -> None:
@@ -3174,11 +3178,11 @@ def emit_qr_marker(qr_urls: list[str]) -> None:
     svg = next((u for u in qr_urls if str(u).lower().endswith(".svg")), "")
     if not png and not svg:
         png = qr_urls[0]
-    print("\n===== UPI QR IMAGE =====")
+    emit_output("\n===== UPI QR IMAGE =====")
     if png:
-        print(f"UPI QR PNG:\n{png}")
+        emit_output(f"UPI QR PNG:\n{png}")
     if svg:
-        print(f"UPI QR SVG:\n{svg}")
+        emit_output(f"UPI QR SVG:\n{svg}")
     log("QR image: %s" % (png or svg)[:120])
 
 
@@ -3281,8 +3285,8 @@ def run_provider_flow(
                 }
                 fp = SCRIPT_DIR / f"upi_after_step2_{time.strftime('%Y%m%d-%H%M%S')}.json"
                 fp.write_text(json.dumps(artifact, ensure_ascii=False, indent=2))
-                print(f"ZERO_AFTER_STEP2_READY: {fp}", flush=True)
-                print(json.dumps(artifact, ensure_ascii=False), flush=True)
+                emit_output(f"ZERO_AFTER_STEP2_READY: {fp}", flush=True)
+                emit_output(json.dumps(artifact, ensure_ascii=False), flush=True)
                 raise SystemExit(0)
             break
         if promotion_index < len(UPI_PROMOTION_COUNTRIES):
@@ -3867,8 +3871,8 @@ def run_single_link_parallel_mode(
                 stop_event.set()
                 for pending in futures:
                     pending.cancel()
-                print("\n===== RESULT =====")
-                print(f"UPI final pay URL:\n{redirect_url}")
+                emit_output("\n===== RESULT =====")
+                emit_output(f"UPI final pay URL:\n{redirect_url}")
                 if env_bool("UPI_SAVE_LINK_ARTIFACT", False):
                     try:
                         artifact = {"url": redirect_url,
@@ -3884,13 +3888,13 @@ def run_single_link_parallel_mode(
                             artifact["merchant"] = (pp.get("brand") or {}).get("business_name")
                             fp = SCRIPT_DIR / f"upi_zero_link_{time.strftime('%Y%m%d-%H%M%S')}.json"
                             fp.write_text(json.dumps(artifact, ensure_ascii=False, indent=2))
-                            print(f"ZERO_LINK_ARTIFACT_SAVED: {fp}", flush=True)
+                            emit_output(f"ZERO_LINK_ARTIFACT_SAVED: {fp}", flush=True)
                         else:
                             fp = SCRIPT_DIR / f"upi_zero_link_{time.strftime('%Y%m%d-%H%M%S')}.json"
                             fp.write_text(json.dumps(artifact, ensure_ascii=False, indent=2))
-                            print(f"ZERO_LINK_ARTIFACT_SAVED: {fp}", flush=True)
+                            emit_output(f"ZERO_LINK_ARTIFACT_SAVED: {fp}", flush=True)
                     except Exception as ee:
-                        print(f"[warn] artifact save fail: {ee}", flush=True)
+                        emit_output(f"[warn] artifact save fail: {ee}", flush=True)
                 return 0
             last_error = error or last_error
             if is_user_already_paid_error(error):
@@ -4042,8 +4046,8 @@ def run_single_link_mode(
             if redirect_url:
                 record_proxy_result("seed", checkout_proxy_used, True, "success")
                 emit_result(status="LINK", upi_link=redirect_url, qr_urls=list(qr_urls))
-                print("\n===== RESULT =====")
-                print(f"UPI final pay URL:\n{redirect_url}")
+                emit_output("\n===== RESULT =====")
+                emit_output(f"UPI final pay URL:\n{redirect_url}")
                 if env_bool("UPI_SAVE_LINK_ARTIFACT", False):
                     try:
                         artifact = {"url": redirect_url,
@@ -4059,13 +4063,13 @@ def run_single_link_mode(
                             artifact["merchant"] = (pp.get("brand") or {}).get("business_name")
                             fp = SCRIPT_DIR / f"upi_zero_link_{time.strftime('%Y%m%d-%H%M%S')}.json"
                             fp.write_text(json.dumps(artifact, ensure_ascii=False, indent=2))
-                            print(f"ZERO_LINK_ARTIFACT_SAVED: {fp}", flush=True)
+                            emit_output(f"ZERO_LINK_ARTIFACT_SAVED: {fp}", flush=True)
                         else:
                             fp = SCRIPT_DIR / f"upi_zero_link_{time.strftime('%Y%m%d-%H%M%S')}.json"
                             fp.write_text(json.dumps(artifact, ensure_ascii=False, indent=2))
-                            print(f"ZERO_LINK_ARTIFACT_SAVED: {fp}", flush=True)
+                            emit_output(f"ZERO_LINK_ARTIFACT_SAVED: {fp}", flush=True)
                     except Exception as ee:
-                        print(f"[warn] artifact save fail: {ee}", flush=True)
+                        emit_output(f"[warn] artifact save fail: {ee}", flush=True)
                 return 0
             last_error = "no_redirect_url"
             record_proxy_result("seed", provider_proxy, False, last_error)
