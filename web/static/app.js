@@ -120,7 +120,6 @@ const els = {
   gstatsCodes: document.getElementById('gstats-codes'),
   gstatsMeta: document.getElementById('gstats-meta'),
   gstatsChart: document.getElementById('gstats-chart'),
-  gstatsFoot: document.getElementById('gstats-foot'),
   historyBox: document.getElementById('history-box'),
   historyList: document.getElementById('history-list'),
   historyCount: document.getElementById('history-count'),
@@ -2315,11 +2314,12 @@ function renderGlobalStats(data) {
   const total = data.total || 0;
   els.gstatsCodes.textContent = String(total);
   els.gstatsMeta.textContent = total
-    ? (data.total_days + ' ngày · ' + data.total_jobs + ' job')
-    : 'chưa có dữ liệu';
+    ? (data.total_days + (data.total_days === 1 ? ' day · ' : ' days · ')
+       + data.total_jobs + (data.total_jobs === 1 ? ' job' : ' jobs'))
+    : 'no data yet';
 
   if (!days.length) {
-    els.gstatsChart.innerHTML = '<div class="gstats-empty">Chưa trích xuất được mã ₹0.00 nào</div>';
+    els.gstatsChart.innerHTML = '<div class="gstats-empty">No ₹0.00 codes extracted yet</div>';
   } else {
     const max = Math.max.apply(null, days.map(d => d.zero).concat([1]));
     const today = new Date().toISOString().slice(0, 10);
@@ -2328,8 +2328,8 @@ function renderGlobalStats(data) {
         + (d.zero ? '' : ' is-zero')
         + (d.zero && d.zero === max ? ' is-best' : '')
         + (d.date === today ? ' is-today' : '');
-      const tip = d.date + ': ' + d.zero + ' mã ₹0.00 · ' + d.jobs + ' job'
-        + (d.unknown ? ' · ' + d.unknown + ' mã chưa rõ giá' : '');
+      const tip = d.date + ': ' + d.zero + ' ₹0.00 codes · '
+        + d.jobs + (d.jobs === 1 ? ' job' : ' jobs');
       const pct = d.zero ? Math.max(4, Math.round((d.zero / max) * 100)) : 2;
       return '<div class="' + cls + '" title="' + tip + '">'
         + '<span class="gbar-value">' + d.zero + '</span>'
@@ -2338,14 +2338,6 @@ function renderGlobalStats(data) {
         + '</div>';
     }).join('');
   }
-
-  const more = all.length - days.length;
-  els.gstatsFoot.innerHTML = 'Tổng <b>' + total + '</b> mã ₹0.00'
-    + (data.unknown_amount
-        ? ' · <b>' + data.unknown_amount + '</b> mã có link nhưng chưa rõ giá (không tính là ₹0)'
-        : '')
-    + (more > 0 ? ' · hiện ' + days.length + '/' + all.length + ' ngày gần nhất' : '')
-    + ' · cập nhật ' + (data.scanned_at || '');
 }
 
 async function init() {

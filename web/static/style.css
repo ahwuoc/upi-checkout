@@ -189,8 +189,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .gbar.is-best .gbar-fill { background: linear-gradient(180deg, var(--blue), #3d82bd); }
 .gbar-date { color: var(--subtle); font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .gbar.is-today .gbar-date { color: var(--text); font-weight: 600; }
-.gstats-foot { color: var(--subtle); font-size: 11px; line-height: 1.6; }
-.gstats-foot b { color: var(--muted); font-weight: 600; }
 
 .overall { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(80px, 1fr) auto; align-items: center; gap: 18px; margin-top: 14px; padding: 14px 18px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
 .overall .stop-note { grid-column: 1 / -1; }
