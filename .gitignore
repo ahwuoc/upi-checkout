@@ -30,3 +30,14 @@ venv/
 .idea/
 .vscode/
 *.log
+findip_token.txt
+
+# ---- Bổ sung: các file lọt lưới ở lần trước (đã kiểm trước khi push) ----
+at_*.txt
+at_new.txt
+proxy_*.txt
+proxy_cliproxy.txt
+*.har
+stream_*.json
+upi_zero_link_*.json
+.trash/

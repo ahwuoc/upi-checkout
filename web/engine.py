@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""engine.py — chạy job trích xuất QR UPI và phát sự kiện progress cho web UI.
+"""engine.py — queue/SSE orchestration for the web UI.
 
-Không chứa logic protocol: mọi bước gọi thẳng các hàm trong `cli.py`
-(detect_one / oaics_one / cs_subprocess_one) qua progress hook.
+Protocol work lives behind the root `backend.py` seam. This module owns task
+lifecycle, retry/stop policy, persistence and progress events only.
 
 Mô hình:
     Job  -> nhiều Task (1 task = 1 access token)
@@ -32,6 +32,7 @@ sys.path.insert(0, str(ROOT))
 
 import cli  # noqa: E402
 import artifact_probe  # noqa: E402
+import backend  # noqa: E402
 
 DEFAULT_PROXY_FILE = ROOT / "proxy.txt"
 STATE_DIR = ROOT / "cs_state"
@@ -185,17 +186,10 @@ class Job:
         self.total = len(tokens)
         self.tasks: dict[str, Task] = {}
         self.order: list[str] = []
-        # cổng proxy theo nhu cầu (bật bằng configure_proxy_gate khi min_score > 0)
-        self.min_score = 0
-        self.lazy_gate = False
-        self._proxy_raw: list[str] = []
-        self._proxy_cursor = 0
-        self._good_cursor = 0
-        self._proxy_score: dict[str, Any] = {}     # proxy -> kết quả score (None = đang đo)
-        self._proxy_good: list[str] = []
-        self._tested = 0
-        self._good_path: Path | None = None
-        self._proxy_lock = threading.Lock()
+        # Lý do dừng: chỉ do người dùng bấm Stop (đã bỏ circuit breaker tự dừng).
+        self.stop_reason = ""
+        self.risk_decline_count = 0
+        self.promo_not_eligible_count = 0
         self.status = "running"           # running | done | stopped
         self.stop_requested = False
         self.started_at = _now()
@@ -330,95 +324,6 @@ class Job:
     def fail(self) -> int:
         return sum(1 for t in self.tasks.values() if t.status == "fail")
 
-    # ---------------------- cổng proxy theo nhu cầu ----------------------
-    def configure_proxy_gate(self, proxies: list[str], min_score: int) -> None:
-        """Bật chế độ 'worker tự đo proxy' cho job này."""
-        self._proxy_raw = list(proxies)
-        self.min_score = int(min_score)
-        self.lazy_gate = bool(self._proxy_raw and self.min_score > 0)
-        self._good_path = STATE_DIR / f"web_good_{self.job_id}.txt"
-        if self.lazy_gate:
-            self._good_path.write_text("", encoding="utf-8")
-
-    def _claim_next_proxy(self) -> str | None:
-        """Giữ chỗ proxy kế tiếp chưa đo (gọi trong lock). None = hết pool."""
-        while self._proxy_cursor < len(self._proxy_raw):
-            cand = self._proxy_raw[self._proxy_cursor]
-            self._proxy_cursor += 1
-            if cand in self._proxy_score:
-                continue
-            self._proxy_score[cand] = None      # đang đo
-            return cand
-        return None
-
-    def acquire_proxy(self, task: Task) -> tuple[str | None, Path | None]:
-        """Proxy cho MỘT task, đo theo nhu cầu.
-
-        Ưu tiên proxy tốt chưa ai dùng; hết thì tự đo proxy kế tiếp trong pool và
-        dùng luôn nếu đạt ngưỡng. Pool cạn mà không có proxy nào đạt -> (None, None).
-        """
-        if not self.lazy_gate:
-            return None, None
-        while True:
-            pick = None
-            with self._proxy_lock:
-                if self._good_cursor < len(self._proxy_good):
-                    pick = self._proxy_good[self._good_cursor]
-                    self._good_cursor += 1
-                elif self._proxy_cursor >= len(self._proxy_raw):
-                    if self._proxy_good:        # đo hết pool -> xoay vòng proxy tốt
-                        pick = self._proxy_good[self._good_cursor % len(self._proxy_good)]
-                        self._good_cursor += 1
-                    else:
-                        return None, None
-                else:
-                    cand = self._claim_next_proxy()
-                    if cand is None:
-                        continue
-            if pick is not None:
-                return pick, self._seed_file(task, pick)
-
-            # Đo NGOÀI lock: giữ lock trong lúc gọi mạng là bóp nghẹt mọi worker.
-            res = cli.score_proxy(cand, self.country or "IN", timeout=LAZY_SCORE_TIMEOUT)
-            score = int(res.get("score") or 0)
-            keep = bool(res.get("ok")) and score >= self.min_score
-            with self._proxy_lock:
-                self._proxy_score[cand] = res
-                self._tested += 1
-                if keep:
-                    self._proxy_good.append(cand)
-                    try:
-                        with self._good_path.open("a", encoding="utf-8") as fh:
-                            fh.write(cand + "\n")
-                    except OSError:
-                        pass
-                tested, nkeep = self._tested, len(self._proxy_good)
-                total = len(self._proxy_raw)
-            if keep:
-                self.emit({"type": "log", "task_id": "*", "line":
-                           "proxy gate: keeper #%d score=%d (tested %d/%d)"
-                           % (nkeep, score, tested, total)})
-            elif tested % LAZY_LOG_EVERY == 0:
-                self.emit({"type": "log", "task_id": "*", "line":
-                           "proxy gate: tested %d/%d, keepers %d (last score=%d)"
-                           % (tested, total, nkeep, score)})
-
-    def gate_error(self) -> str:
-        """Lý do không lấy được proxy nào cho task (để UI hiện đúng, không đoán)."""
-        return ("no proxy scored ≥ %d (tested %d/%d, keepers %d). "
-                "Lower the threshold or change the pool."
-                % (self.min_score, self._tested, len(self._proxy_raw),
-                   len(self._proxy_good)))
-
-    def _seed_file(self, task: Task, chosen: str) -> Path:
-        """File seed cho 1 task: proxy của task lên đầu, kèm vài proxy tốt dự phòng
-        (để retry bên trong extract_cs vẫn có cái khác mà đổi)."""
-        with self._proxy_lock:
-            others = [p for p in self._proxy_good if p != chosen][:SEED_FALLBACKS]
-        path = STATE_DIR / f"web_seed_{self.job_id}_{task.task_id}.txt"
-        path.write_text("\n".join([chosen] + others) + "\n", encoding="utf-8")
-        return path
-
     def snapshot(self) -> dict:
         return {
             "job_id": self.job_id,
@@ -434,6 +339,7 @@ class Job:
             "status": self.status,
             "stop_requested": self.stop_requested,
             "proxy_source": self.proxy_source,
+            "stop_reason": self.stop_reason,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "duration_ms": self.duration_ms,
@@ -479,17 +385,6 @@ LINK_TERMINAL = ("succeeded", "failed", "canceled", "expired")
 MONITOR_SECS = float(os.environ.get("UPI_MONITOR_SECS", "30") or 30)
 MONITOR_CONC = int(os.environ.get("UPI_MONITOR_CONC", "8") or 8)
 MONITOR_MAX_IDLE_MIN = 30.0     # job xong lâu hơn mức này thì thôi không dò nữa
-
-# ---- cổng proxy theo nhu cầu (lazy gate) -------------------------------------
-# Trước đây `min_score > 0` quét + chấm điểm CẢ pool ngay trong POST /api/run rồi
-# mới tạo job: 500 proxy / 12 luồng / timeout 15s = 2-3 phút đứng chờ, chưa có job,
-# mà đó lại là 12 luồng trong khi job được set tới 40-64 worker.
-# Giờ mỗi worker tự đo proxy khi nó cần: lấy proxy tốt chưa ai dùng, hết thì đo
-# tiếp proxy kế tiếp trong pool. Job chạy ngay, và việc đo nằm trong chính worker.
-LAZY_SCORE_TIMEOUT = int(os.environ.get("UPI_LAZY_SCORE_TIMEOUT") or 8)
-SEED_FALLBACKS = int(os.environ.get("UPI_SEED_FALLBACKS") or 7)   # proxy dự phòng ghi kèm seed
-LAZY_LOG_EVERY = 25            # log tiến độ đo mỗi N proxy (đo đủ nhanh thì khỏi spam)
-
 
 def _link_monitor_targets() -> list[tuple[Job, Task]]:
     """Task cần dò: có link QR, chưa ở trạng thái cuối, job còn 'nóng'."""
@@ -765,8 +660,8 @@ def list_jobs() -> list[dict]:
 def parse_proxy_lines(text: str) -> list[str]:
     """Chuẩn hoá pool proxy về URL form `http://user:pass@host:port`.
 
-    QUAN TRỌNG: extract_cs.py (chạy trong subprocess luồng cs_) đọc file seed và
-    cần username nằm sau `@` để rewrite `region-XX`. Dạng compact
+    extract_cs.py reads the seed file and needs the username after `@` to
+    rewrite `region-XX`. Compact
     `host:port:user:pass` không có `@` -> urlsplit().username = None -> báo
     "Proxy has no writable country/region selector". Nên phải ghi ra URL form.
     """
@@ -794,11 +689,16 @@ _parse_proxies = parse_proxy_lines
 
 
 def _prepare_proxies(job_id: str, proxies: str | None,
-                     min_score: int = 0) -> tuple[Path, list[str], str, bool]:
-    """Tra ve (proxy_file de truyen cho cs_runner, danh sach proxy, nhan hien thi).
+                     task_count: int = 0) -> tuple[Path, list[str], str, dict]:
+    """Tra ve (proxy_file, danh sach proxy, nhan hien thi, bao cao chat luong).
 
-    `min_score` > 0: do + cham diem ca pool truoc, chi giu proxy dat nguong
-    (proxy sach / risk thap) roi moi chay.
+    KHONG cham proxy o day nua (mac dinh `UPI_PROXY_QUALITY=lazy`). Vi sao: cham
+    global nam trong POST /api/run nen UI dung o "Creating job... 1m08s" — do that
+    30 proxy mat 13-45s, 100 proxy mat 44-77s, trong khi task dau tien chua chay.
+    Gio moi worker tu cham lay proxy cua minh trong `_acquire_proxy` (song song),
+    nen job bat dau ngay va chi nhung proxy THUC SU dung moi bi cham.
+
+    `UPI_PROXY_QUALITY=pre` -> quay lai cham global truoc khi chay (nhu ban cu).
     """
     if proxies and proxies.strip():
         px = parse_proxy_lines(proxies)
@@ -807,17 +707,64 @@ def _prepare_proxies(job_id: str, proxies: str | None,
         px = cli.load_proxies(DEFAULT_PROXY_FILE)
         label = f"{DEFAULT_PROXY_FILE.name} ({len(px)} proxy)"
 
-    # min_score > 0: KHÔNG quét trước nữa — để từng worker tự đo proxy khi cần
-    # (xem Job.acquire_proxy). Quét cả pool ở đây làm POST /api/run treo 2-3 phút
-    # trong khi chưa có job nào để xem.
-    needs_gate = bool(min_score > 0 and px)
-    if needs_gate:
-        label = f"{label} · lazy gate ≥{min_score}"
+    report: dict = {"mode": proxy_quality_mode()}
+    if proxy_quality_mode() == "pre" and px:
+        try:
+            import ippure  # noqa: PLC0415
+            if ippure.enabled():
+                budget = int(os.environ.get("UPI_PROXY_QUALITY_MAX") or 0) or len(px)
+                budget = max(8, min(budget, len(px)))
+                t0 = time.time()
+                rows = ippure.scan(px[:budget], "IN", cli.proxy_persona_timezone(),
+                                   workers=max(4, min(32, budget)),
+                                   history_of=cli.proxy_history)
+                usable = [r["proxy"] for r in rows if r.get("ok")]
+                dead = [r["proxy"] for r in rows if not r.get("ok")]
+                if usable:
+                    px = [r["proxy"] for r in rows if r.get("ok")] + \
+                         [p for p in px if p not in set(px[:budget]) and p not in set(dead)]
+                best = rows[0] if rows else {}
+                report.update({"scanned": len(rows), "usable": len(usable), "budget": budget,
+                               "seconds": round(time.time() - t0, 1), "excluded": len(dead),
+                               "best": {"grade": best.get("grade"), "score": best.get("score"),
+                                        "country": best.get("country"), "risk": best.get("risk"),
+                                        "user_type": best.get("user_type"), "isp": best.get("isp"),
+                                        "family": best.get("family"),
+                                        "latency_ms": best.get("latency_ms")},
+                               "flags": best.get("flags") or []})
+        except Exception as exc:  # noqa: BLE001 — cham diem loi thi chay nhu cu
+            report["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
 
     path = STATE_DIR / f"web_proxies_{job_id}.txt"
     # Ghi URL form (khong phai nguyen van textarea) — xem parse_proxy_lines()
     path.write_text("\n".join(px) + "\n", encoding="utf-8")
-    return path, px or [""], label, needs_gate
+    return path, px or [""], label, report
+
+
+_PROXY_PICK_LOCK = threading.Lock()
+_PROXY_PICK_INDEX: dict[str, int] = {}
+
+
+def _pick_proxy(job_id: str, proxies: list[str], task_id: str = "") -> str:
+    """Chia proxy theo THU TU da xep hang -> moi task mot con khac nhau.
+
+    Ban cu dung secrets.choice(proxies): 100 task tren 100 proxy thi trung nhau
+    nhieu (chi ~63% proxy duoc dung) va task nao cung co the nhan proxy F.
+    Dat UPI_PROXY_QUALITY=0 de quay lai random nhu truoc.
+    """
+    if not proxies:
+        return ""
+    if len(proxies) == 1:
+        return proxies[0]
+    if str(os.environ.get("UPI_PROXY_QUALITY") or "1").strip().lower() in ("0", "false", "no", "off"):
+        return secrets.choice(proxies)
+    with _PROXY_PICK_LOCK:
+        index = _PROXY_PICK_INDEX.get(job_id, 0)
+        _PROXY_PICK_INDEX[job_id] = index + 1
+    picked = proxies[index % len(proxies)]
+    if task_id:
+        _lease_proxy(job_id, picked, task_id)
+    return picked
 
 
 # -------------------------------------------------------------- step helpers
@@ -887,17 +834,281 @@ def _emit_egress(job: Job, task: Task, proxy: str) -> None:
         return
     ex = info.get("exit") or {}
     bl = info.get("billing") or {}
+    _emit_egress_payload(job, task, proxy, ex, bl, info.get("billing_country") or "")
+
+
+def _emit_egress_payload(job: Job, task: Task, proxy: str, ex: dict, bl: dict,
+                         billing_country: str = "") -> None:
     eg = {
         "proxy": proxy,
         "exit": ex,
         "billing": bl,
-        "billing_country": info.get("billing_country") or "",
+        "billing_country": billing_country,
         "probed_at": _now(),
         "same_ip": bool(ex.get("ip")) and ex.get("ip") == bl.get("ip"),
     }
     task.egress = eg
     task.updated_at = _now()
     job.emit({"type": "egress", "task_id": task.task_id, **eg})
+
+
+# ------------------------------------------------ proxy: moi worker tu cham lay
+# Vi sao khong cham global truoc khi chay: do that 30 proxy mat 13-45s (tuy muc
+# song song), 100 proxy mat 44-77s, va toan bo thoi gian do nam trong POST
+# /api/run -> UI dung im o "Creating job... 1m08s" truoc khi task dau tien chay.
+# Cach lam dung: moi worker tu lay 1 proxy roi tu cham lay no, chay song song voi
+# cac worker khac -> job bat dau ngay, va chi nhung proxy THUC SU dung moi bi cham.
+_PROXY_TRIED_LOCK = threading.Lock()
+_PROXY_BAD: dict[str, set[str]] = {}
+_PROXY_SCAN_INDEX: dict[str, int] = {}
+# Ket qua da cham theo proxy (khong theo job): batch 500 task nhung pool 100 thi
+# vong tron se dung lai cung proxy -> lan sau khong phai do lai (moi lan do la 1
+# request qua proxy ~2-4s). TTL vi session co the doi IP.
+_PROXY_VERDICT: dict[str, tuple[float, dict]] = {}
+# Lease: proxy dang duoc 1 task chay thi task khac khong lay nua. Tranh 2 task cung
+# luc di ra cung 1 IP (de bi risk engine ghep nhom) va tranh pool bi dung don ve
+# mot vai con. Het proxy roi moi cho phep dung lai, uu tien con lau nhat.
+_PROXY_LEASES: dict[str, dict[str, tuple[str, float]]] = {}   # job_id -> proxy -> (task_id, ts)
+_LAST_TASK_PROXY: dict[str, str] = {}                          # "job|task" -> proxy da lease
+
+
+def _lease_proxy(job_id: str, proxy: str, task_id: str) -> None:
+    with _PROXY_TRIED_LOCK:
+        _PROXY_LEASES.setdefault(job_id, {})[proxy] = (task_id, time.time())
+        _LAST_TASK_PROXY[f"{job_id}|{task_id}"] = proxy
+
+
+def _release_task_proxy(job_id: str, task_id: str) -> None:
+    """Task xong -> tra proxy lai cho pool (goi trong finally cua _run_task)."""
+    key = f"{job_id}|{task_id}"
+    with _PROXY_TRIED_LOCK:
+        proxy = _LAST_TASK_PROXY.pop(key, "")
+        leases = _PROXY_LEASES.get(job_id)
+        if proxy and leases and proxy in leases:
+            leases.pop(proxy, None)
+
+
+def _leased_proxies(job_id: str) -> dict[str, tuple[str, float]]:
+    with _PROXY_TRIED_LOCK:
+        return dict(_PROXY_LEASES.get(job_id, {}))
+
+
+def _clear_job_proxy_state(job_id: str) -> None:
+    with _PROXY_TRIED_LOCK:
+        _PROXY_BAD.pop(job_id, None)
+        _PROXY_SCAN_INDEX.pop(job_id, None)
+        _PROXY_PICK_INDEX.pop(job_id, None)
+        for key in [k for k in _LAST_TASK_PROXY if k.startswith(f"{job_id}|")]:
+            _LAST_TASK_PROXY.pop(key, None)
+        _PROXY_LEASES.pop(job_id, None)
+
+
+def _proxy_exit_ip(proxy: str) -> str:
+    return str((_cached_verdict(proxy) or {}).get("ip") or "")
+
+
+def _proxy_verdict_ttl() -> float:
+    return float(os.environ.get("UPI_PROXY_VERDICT_TTL") or 900)
+
+
+def _cached_verdict(proxy: str) -> dict:
+    with _PROXY_TRIED_LOCK:
+        hit = _PROXY_VERDICT.get(proxy)
+    if not hit:
+        return {}
+    ts, verdict = hit
+    ttl = _proxy_verdict_ttl()
+    if ttl > 0 and time.time() - ts > ttl:
+        return {}
+    return verdict
+
+
+def _cache_verdict(proxy: str, verdict: dict) -> None:
+    with _PROXY_TRIED_LOCK:
+        _PROXY_VERDICT[proxy] = (time.time(), verdict)
+
+
+def proxy_quality_mode() -> str:
+    """`lazy` (mac dinh): worker tu cham lay; `pre`: cham global truoc khi chay; `off`: bo qua."""
+    raw = str(os.environ.get("UPI_PROXY_QUALITY") or "lazy").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return "off"
+    if raw in ("pre", "global"):
+        return "pre"
+    return "lazy"
+
+
+def _mark_proxy_bad(job_id: str, proxy: str) -> None:
+    with _PROXY_TRIED_LOCK:
+        _PROXY_BAD.setdefault(job_id, set()).add(proxy)
+
+
+def _bad_proxies(job_id: str) -> set[str]:
+    with _PROXY_TRIED_LOCK:
+        return set(_PROXY_BAD.get(job_id, ()))
+
+
+def _claim_candidate(job_id: str, proxies: list[str], task_id: str = "") -> str:
+    """Chon proxy VA lease trong CUNG mot lan giu lock (nguyen tu).
+
+    Vi sao phai gop: neu chon truoc roi lease sau thi 2 worker co the cung doc thay
+    mot con "chua ai dung" roi cung nhan -> trung proxy, hoac trung ca IP exit (2
+    entry khac nhau tro ve cung 1 IP). Do that truoc khi gop: 20 luong tranh nhau
+    tren pool 10 (co 2 con trung IP) van lot 1 luot trung IP.
+
+    Thu tu uu tien:
+      1. chua bi danh hong + chua ai lease + IP exit chua ai dung
+      2. chua bi danh hong + chua ai lease
+      3. het proxy roi: dung lai con co lease CU nhat (chia deu, khong don 1 con)
+    """
+    if not proxies:
+        return ""
+    with _PROXY_TRIED_LOCK:
+        bad = set(_PROXY_BAD.get(job_id, ()))
+        leases = dict(_PROXY_LEASES.get(job_id, {}))
+        used_ips = set()
+        for leased in leases:
+            ip = str((_PROXY_VERDICT.get(leased, (0, {}))[1] or {}).get("ip") or "")
+            if ip:
+                used_ips.add(ip)
+        start = _PROXY_SCAN_INDEX.get(job_id, 0)
+
+        def walk(pred):
+            for offset in range(len(proxies)):
+                idx = (start + offset) % len(proxies)
+                cand = proxies[idx]
+                if cand and cand not in bad and pred(cand):
+                    return idx, cand
+            return -1, ""
+
+        def ip_of(cand):
+            return str((_PROXY_VERDICT.get(cand, (0, {}))[1] or {}).get("ip") or "")
+
+        idx, picked = walk(lambda c: c not in leases and (ip_of(c) or "x") not in used_ips)
+        if not picked:
+            idx, picked = walk(lambda c: c not in leases)
+        if not picked:
+            free = [(i, p) for i, p in enumerate(proxies) if p and p not in bad]
+            if free:
+                idx, picked = min(free, key=lambda ip: leases.get(ip[1], ("", 0.0))[1])
+        if not picked:
+            return ""
+        _PROXY_SCAN_INDEX[job_id] = idx + 1
+        if task_id:
+            _PROXY_LEASES.setdefault(job_id, {})[picked] = (task_id, time.time())
+            _LAST_TASK_PROXY[f"{job_id}|{task_id}"] = picked
+        return picked
+
+
+def _release_proxy(job_id: str, proxy: str) -> None:
+    """Tra 1 proxy cu the (dung khi verify that bai)."""
+    with _PROXY_TRIED_LOCK:
+        leases = _PROXY_LEASES.get(job_id)
+        if leases and proxy in leases:
+            leases.pop(proxy, None)
+
+
+def _verdict_usable(verdict: dict, target_country: str) -> bool:
+    if not verdict or not verdict.get("ok"):
+        return False
+    flags = set(verdict.get("flags") or ())
+    if {"unreachable", "wrong-country", "tor", "malicious"} & flags:
+        return False
+    cc = str(verdict.get("country") or "").upper()
+    return (not target_country) or cc == str(target_country).upper()
+
+
+def _task_seed_file(job: Job, task: Task, proxy: str, proxies: list[str], backups: int = 5) -> Path:
+    """Seed rieng cho 1 task: proxy da verify dung dau, sau do vai con du phong.
+
+    extract_cs doc `UPI_PROXY_SEED_FILE` va tu chon seed trong danh sach do, nen
+    dua proxy da verify len dau la task dung dung IP sach vua cham, ma van con con
+    du phong de xoay neu con dau hong giua flow.
+    """
+    lines = [proxy]
+    bad = _bad_proxies(job.job_id)
+    for cand in proxies:
+        if len(lines) > backups:
+            break
+        if cand and cand != proxy and cand not in bad:
+            lines.append(cand)
+    path = STATE_DIR / f"web_seed_{job.job_id}_{task.task_id}.txt"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _acquire_proxy(job: Job, task: Task, proxies: list[str],
+                   fallback_seed: Path) -> tuple[str, Path, dict]:
+    """Worker tu lay + tu cham proxy cua minh. Tra (proxy, seed_file, verdict).
+
+    Cham ~2-5s trong CHINH thread cua worker, song song voi cac worker khac. Con
+    nao hong (khong ket noi duoc / sai nuoc / tor / malicious) thi danh dau de
+    worker khac khong thu lai, roi thu con ke tiep.
+    """
+    if proxy_quality_mode() != "lazy":
+        proxy = _pick_proxy(job.job_id, proxies, task.task_id)
+        return proxy, fallback_seed, {}
+    try:
+        import ippure  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        proxy = _pick_proxy(job.job_id, proxies, task.task_id)
+        return proxy, fallback_seed, {}
+    if not ippure.enabled():
+        proxy = _pick_proxy(job.job_id, proxies, task.task_id)
+        return proxy, fallback_seed, {}
+
+    attempts = max(1, int(os.environ.get("UPI_PROXY_TRY") or 4))
+    for _ in range(attempts):
+        cand = _claim_candidate(job.job_id, proxies, task.task_id)
+        if not cand:
+            break
+        cached = _cached_verdict(cand)
+        if cached:
+            # da cham roi (batch lon dung lai proxy) -> khoi do lai 2-4s
+            if _verdict_usable(cached, job.country):
+                return cand, _task_seed_file(job, task, cand, proxies), cached
+            _mark_proxy_bad(job.job_id, cand)
+            _release_proxy(job.job_id, cand)
+            continue
+        verdict = ippure.check(cand, job.country, cli.proxy_persona_timezone(),
+                               timeout=20, history=cli.proxy_history(cand))
+        _cache_verdict(cand, verdict)
+        if _verdict_usable(verdict, job.country):
+            job.emit({"type": "log", "task_id": task.task_id, "line":
+                      f"proxy {verdict.get('label') or '?'}: {verdict.get('grade')} "
+                      f"{verdict.get('score')} điểm · {verdict.get('country')} · "
+                      f"risk={verdict.get('risk')} · {verdict.get('user_type') or '?'} · "
+                      f"{verdict.get('latency_ms')}ms"})
+            return cand, _task_seed_file(job, task, cand, proxies), verdict
+        _mark_proxy_bad(job.job_id, cand)
+        _release_proxy(job.job_id, cand)
+        job.emit({"type": "log", "task_id": task.task_id, "line":
+                  f"proxy {verdict.get('label') or '?'} bị loại: {','.join(verdict.get('flags') or ['?'])}"})
+
+    # Het con dung duoc -> sinh them 1 session moi ngay tai day (neu bat)
+    gen_gate = str(os.environ.get("UPI_PROXY_GENERATE") or "1").strip().lower()
+    if gen_gate not in ("0", "false", "no", "off"):
+        try:
+            import proxy_pool  # noqa: PLC0415
+            extra, _ = proxy_pool.harvest(
+                proxies[0], 1, "B", job.country, cli.proxy_persona_timezone(),
+                workers=1, timeout=20, max_attempts=6,
+                sess_time=int(os.environ.get("UPI_PROXY_SESS_TIME") or 30),
+                log=lambda *a: None)
+            if extra:
+                cand = extra[0]["proxy"]
+                proxies.append(cand)
+                job.emit({"type": "log", "task_id": task.task_id, "line":
+                          f"pool hết proxy dùng được -> sinh session mới {extra[0].get('label')} "
+                          f"({extra[0].get('country')}, risk={extra[0].get('risk')})"})
+                _lease_proxy(job.job_id, cand, task.task_id)
+                return cand, _task_seed_file(job, task, cand, proxies), extra[0]
+        except Exception:  # noqa: BLE001 — sinh lỗi thì vẫn chạy bằng pool cũ
+            pass
+
+    # Khong con con nao "sach": van phai chay -> dung con ke tiep chua bi danh hong
+    cand = _claim_candidate(job.job_id, proxies, task.task_id) or (proxies[0] if proxies else "")
+    return cand, fallback_seed, {}
 
 
 def _set_flow(job: Job, task: Task, flow: str, session: str = "", provider: str = "") -> None:
@@ -978,6 +1189,12 @@ def _finish(job: Job, task: Task, result: dict, t0: float) -> None:
     if result.get("risk_decline"):
         task.no_retry = True
         task.no_retry_reason = "Stripe risk decline (account flagged)"
+        job.risk_decline_count += 1
+    elif result.get("promo_not_eligible"):
+        # Account không được hưởng promo 0₫ -> chạy lại cũng vậy, khỏi tốn ~2 phút nữa.
+        task.no_retry = True
+        task.no_retry_reason = "account not eligible for ₹0 promo"
+        job.promo_not_eligible_count += 1
 
     link = result.get("upi_link") or ""
     _verify_link(job, task, result, link)
@@ -1024,36 +1241,33 @@ def _run_task(job: Job, task: Task, proxy_file: Path, proxies: list[str]) -> boo
               "flow": task.flow})
 
     step, on_log, on_geo = _mk_hooks(job, task)
-    proxy = proxies[task.index % len(proxies)] if proxies else ""
-    seed = proxy_file
-    if job.lazy_gate:
-        # Worker tự lấy proxy đạt ngưỡng cho task này (đo ngay lúc cần, không chờ
-        # quét cả pool). Không có cái nào đạt -> fail thẳng, nói rõ đã đo bao nhiêu.
-        picked, seed = job.acquire_proxy(task)
-        if not picked:
-            _finish(job, task, {"email": task.email, "status": "error",
-                                "err": job.gate_error()}, time.time())
-            return False
-        proxy = picked
-    # Do IP exit/billing o thread rieng -> khong chan luong chinh,
-    # UI hien IP ngay khi probe xong (thuong <2s).
-    if proxy:
+    # Moi worker tu lay + tu cham proxy cua minh (xem _acquire_proxy): job bat dau
+    # ngay, khong con phai cho cham ca pool o POST /api/run. Proxy da verify duoc
+    # ghi thanh seed rieng cua task -> ca luong CS cung dung dung IP sach do.
+    proxy, seed, verdict = _acquire_proxy(job, task, proxies, proxy_file)
+    if verdict:
+        ex = {k: verdict.get(k) for k in ("ip", "country", "timezone", "risk", "verdict",
+                                          "user_type", "isp", "latency_ms", "family")}
+        ex["country"] = str(verdict.get("country") or "")
+        _emit_egress_payload(job, task, proxy, ex, {})
+    elif proxy:
+        # Do IP exit/billing o thread rieng -> khong chan luong chinh,
+        # UI hien IP ngay khi probe xong (thuong <2s).
         threading.Thread(target=_emit_egress, args=(job, task, proxy), daemon=True).start()
     t0 = time.time()
     try:
         if job.mode == "cs":
             _set_flow(job, task, "cs")
-            r = cli.cs_subprocess_one(task.token, seed, job.promo, STATE_DIR,
-                                      task.index, step=step, on_log=on_log,
-                                      retry_limit=job.retries,
-                                      should_stop=lambda: job.stop_requested)
+            r = backend.run_cs(_backend_request(job, task, proxy, seed),
+                               _backend_hooks(job, task, step, on_log, on_geo))
         elif job.mode == "oaics":
             _set_flow(job, task, "oaics")
-            r = cli.oaics_one(task.token, proxy, job.country, job.promo,
-                              step=step, on_geo=on_geo)
+            r = backend.run_oaics(_backend_request(job, task, proxy, seed),
+                                  _backend_hooks(job, task, step, on_log, on_geo))
         else:
             # auto: do provider truoc, roi chay dung luong
-            d = cli.detect_one(task.token, proxy, job.country, step=step)
+            d = backend.detect(_backend_request(job, task, proxy, seed),
+                               _backend_hooks(job, task, step, on_log, on_geo))
             kind = d.get("kind")
             if d.get("status") == "error" and not kind:
                 # khong do duoc provider (vd sentinel loi / token 401) -> khong chay
@@ -1063,20 +1277,36 @@ def _run_task(job: Job, task: Task, proxy_file: Path, proxies: list[str]) -> boo
             elif kind == "oaics":
                 _set_flow(job, task, "oaics", session=str(d.get("session") or ""),
                           provider=str(d.get("provider") or ""))
-                r = cli.oaics_one(task.token, proxy, job.country, job.promo,
-                                  step=step, on_geo=on_geo)
+                r = backend.run_oaics(_backend_request(job, task, proxy, seed),
+                                      _backend_hooks(job, task, step, on_log, on_geo))
             else:
                 # cs_ hoac kind la (khong nhan dang duoc) -> di luong cs
                 _set_flow(job, task, "cs", session=str(d.get("session") or ""),
                           provider=str(d.get("provider") or ""))
-                r = cli.cs_subprocess_one(task.token, seed, job.promo, STATE_DIR,
-                                          task.index, step=step, on_log=on_log,
-                                          retry_limit=job.retries,
-                                          should_stop=lambda: job.stop_requested)
+                r = backend.run_cs(_backend_request(job, task, proxy, seed),
+                                   _backend_hooks(job, task, step, on_log, on_geo))
     except Exception as exc:  # noqa: BLE001
         r = {"email": task.email, "status": "error", "err": str(exc)[:200]}
+    finally:
+        # tra proxy lai pool de task khac dung duoc (xem _lease_proxy)
+        _release_task_proxy(job.job_id, task.task_id)
     _finish(job, task, r, t0)
     return task.status == "done"
+
+
+def _backend_request(job: Job, task: Task, proxy: str, seed: Path) -> backend.BackendRequest:
+    return backend.BackendRequest(
+        token=task.token, proxy=proxy, seed_file=seed, state_dir=STATE_DIR,
+        index=task.index, country=job.country, promo=job.promo,
+        retry_limit=job.retries,
+    )
+
+
+def _backend_hooks(job: Job, task: Task, step, on_log, on_geo) -> backend.BackendHooks:
+    return backend.BackendHooks(
+        step=step, on_log=on_log, on_geo=on_geo,
+        should_stop=lambda: job.stop_requested,
+    )
 
 
 def _cleanup_job_files(job: Job) -> None:
@@ -1154,12 +1384,15 @@ def _job_worker(job: Job, proxy_file: Path, proxies: list[str]) -> None:
     with ThreadPoolExecutor(max_workers=max(1, min(job.workers, job.total))) as ex:
         list(ex.map(work, job.order))
 
+    # Job xong -> xoa state proxy cua job (lease/bad/index) de khong phinh theo so job
+    _clear_job_proxy_state(job.job_id)
     job.duration_ms = int((time.time() - job._t0) * 1000)
     job.finished_at = _now()
     job.status = "stopped" if job.stop_requested else "done"
     job.emit({"type": "job_done", "job_id": job.job_id, "ok": job.ok,
               "fail": job.fail, "done": job.done, "total": job.total,
-              "status": job.status, "duration_ms": job.duration_ms})
+              "status": job.status, "duration_ms": job.duration_ms,
+              "stop_reason": job.stop_reason})
     # luu ra file truoc khi dong log -> khong mat khi server restart
     job.write_results()
     _cleanup_job_files(job)
@@ -1170,7 +1403,7 @@ def _job_worker(job: Job, proxy_file: Path, proxies: list[str]) -> None:
 
 # ---------------------------------------------------------------- public API
 def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: int,
-              proxies: str | None, min_score: int = 0, retries: int = 1) -> Job:
+              proxies: str | None, retries: int = 1) -> Job:
     tokens = [t.strip() for t in tokens if t.strip()]
     if not tokens:
         raise ValueError("no tokens")
@@ -1179,10 +1412,8 @@ def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: i
 
     STATE_DIR.mkdir(exist_ok=True)
     job_id = secrets.token_hex(6)
-    proxy_file, px, label, needs_gate = _prepare_proxies(job_id, proxies, min_score)
+    proxy_file, px, label, quality = _prepare_proxies(job_id, proxies, len(tokens))
     job = Job(job_id, mode, tokens, country, promo, workers, label, retries)
-    if needs_gate:
-        job.configure_proxy_gate(px, min_score)
 
     with _JOBS_LOCK:
         _JOBS[job_id] = job
@@ -1191,15 +1422,38 @@ def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: i
             old = _JOB_ORDER.pop(0)
             _JOBS.pop(old, None)
 
-    if job.lazy_gate:
-        job.emit({"type": "log", "task_id": "*", "line":
-                  "proxy gate ≥%d: each worker scores its own proxy on demand "
-                  "(pool %d, timeout %ds)"
-                  % (job.min_score, len(job._proxy_raw), LAZY_SCORE_TIMEOUT)})
     job.emit({"type": "job_start", "job_id": job_id, "mode": mode, "total": job.total,
               "country": country, "promo": promo, "workers": job.workers,
               "retries": job.retries,
               "proxy_source": label, "started_at": job.started_at})
+    if quality:
+        # UI hien duoc chat luong pool: diem/risk/user_type cua proxy tot nhat +
+        # may con te nhat, de biet pool co dang dung hay khong.
+        job.emit({"type": "proxy_quality", **quality})
+        best = quality.get("best") or {}
+        if best:
+            gen = quality.get("generated") or {}
+            job.emit({"type": "log", "task_id": "*", "line":
+                      f"proxy quality: chấm {quality.get('scanned')} proxy trong "
+                      f"{quality.get('seconds')}s | tốt nhất {best.get('grade')} "
+                      f"{best.get('score')} điểm, {best.get('country')}, risk={best.get('risk')}, "
+                      f"{best.get('user_type')}, {str(best.get('isp'))[:32]} "
+                      f"({best.get('latency_ms')}ms)"
+                      + (f" | loại {quality['excluded']} proxy chết/cờ xấu"
+                         if quality.get("excluded") else "")
+                      + (f" | thiếu {quality['short']} -> sinh bù {gen.get('verified')} proxy "
+                         f"mới (session {gen.get('sess_minutes')} phút, {gen.get('attempts')} lần thử, "
+                         f"{gen.get('seconds')}s)" if gen else "")
+                      + (f" | sinh bù lỗi: {quality['generate_error']}"
+                         if quality.get("generate_error") else "")})
+        elif quality.get("mode") == "lazy":
+            # mặc định: không chấm global -> mỗi worker tự chấm lấy trước khi chạy
+            job.emit({"type": "log", "task_id": "*", "line":
+                      "proxy quality: chấm theo từng worker (job bắt đầu ngay; mỗi worker "
+                      "tự đo + tự chấm proxy của mình trước khi chạy)"})
+        elif quality.get("error"):
+            job.emit({"type": "log", "task_id": "*",
+                      "line": f"proxy quality: bỏ qua ({quality['error']})"})
 
     th = threading.Thread(target=_job_worker, args=(job, proxy_file, px), daemon=True)
     th.start()
@@ -1211,6 +1465,8 @@ def stop_job(job_id: str) -> bool:
     if not job or job.status != "running":
         return False
     job.stop_requested = True
+    if not job.stop_reason:
+        job.stop_reason = "dừng theo yêu cầu (bạn bấm Stop) — các task còn lại bị bỏ"
     job.emit({"type": "job_stopping", "job_id": job.job_id})
     job.emit({"type": "log", "task_id": "*", "line": "== stop requested =="})
     return True
@@ -1239,6 +1495,110 @@ def retry_task(job_id: str, task_id: str) -> bool:
     threading.Thread(target=_run_with_retries, args=(job, task, proxy_file, proxies),
                      daemon=True).start()
     return True
+
+
+def append_tasks(job_id: str, tokens: list[str]) -> dict:
+    """Thêm AT (token) vào queue của job đang chạy (hoặc job đã xong).
+
+    Vì sao cần: trước đây muốn chạy thêm acc thì phải bấm Stop rồi gửi job mới —
+    mất phần đang chạy, và phải chấm lại pool proxy từ đầu. Hàm này nối thẳng vào
+    job hiện có: **giữ nguyên pool proxy của job**, thêm task vào cuối `order`,
+    rồi cấp worker riêng cho đúng phần vừa thêm.
+
+    Bỏ qua token trùng (đã có trong job, hoặc trùng nhau trong lần thêm này) —
+    chạy lại cùng một acc vừa tốn thời gian vừa tốn hạn mức proxy.
+    """
+    job = get_job(job_id)
+    if job is None:
+        return {"ok": False, "error": "job does not exist", "added": 0, "skipped": 0}
+
+    clean = [str(t).strip() for t in (tokens or []) if str(t).strip()]
+    with job._lock:
+        known = {t.token for t in job.tasks.values()}
+        fresh = []
+        skipped = 0
+        for tok in clean:
+            if tok in known:
+                skipped += 1
+                continue
+            known.add(tok)
+            fresh.append(tok)
+        if not fresh:
+            return {"ok": True, "added": 0, "skipped": skipped, "total": job.total}
+
+        # id mới phải không đụng id cũ (task có thể đã bị xoá -> t{n} bị trống)
+        used = set(job.tasks.keys())
+        next_index = max((t.index for t in job.tasks.values()), default=-1) + 1
+        new_ids: list[str] = []
+        for k, tok in enumerate(fresh):
+            idx = next_index + k
+            tid = f"t{idx + 1}"
+            while tid in used:
+                idx += 1
+                tid = f"t{idx + 1}"
+            used.add(tid)
+            t = Task(task_id=tid, index=idx, token=tok, email=cli.decode_email(tok))
+            t.set_steps(cli.steps_for(job.mode))
+            job.tasks[tid] = t
+            job.order.append(tid)
+            new_ids.append(tid)
+        job.total = len(job.order)
+        was_idle = job.status != "running"
+        if was_idle:
+            job.status = "running"
+            job.finished_at = None
+            job.stop_requested = False
+            job.stop_reason = ""
+
+    # Mở lại file log: job xong thì close_log() đã đặt _log_fh = None, mà log_line()
+    # thoát ngay khi None -> không mở lại là mất sạch log của phần vừa thêm.
+    with job._log_lock:
+        if job._log_fh is None:
+            try:
+                job._log_fh = job.log_path.open("a", encoding="utf-8")
+            except OSError:
+                job._log_fh = None
+
+    proxy_file = DEFAULT_PROXY_FILE
+    if job.proxy_source.startswith("custom proxy pool"):
+        p = STATE_DIR / f"web_proxies_{job_id}.txt"
+        if p.exists():
+            proxy_file = p
+    proxies = cli.load_proxies(proxy_file)
+
+    for tid in new_ids:
+        t = job.tasks.get(tid)
+        if t is None:
+            continue
+        job.emit({"type": "task_init", "task_id": tid, "index": t.index,
+                  "email": t.email, "flow": t.flow, "steps": t.steps, "run": 0})
+    job.emit({"type": "log", "task_id": "*", "line":
+              f"đã thêm {len(new_ids)} acc vào queue (bỏ qua {skipped} acc trùng) — tổng {job.total}"})
+    job.write_results()
+
+    def _run_added() -> None:
+        try:
+            with ThreadPoolExecutor(max_workers=max(1, min(job.workers, len(new_ids)))) as ex:
+                list(ex.map(
+                    lambda tid: (job.tasks.get(tid) is not None
+                                 and _run_with_retries(job, job.tasks[tid], proxy_file, proxies)),
+                    new_ids))
+        except Exception as exc:  # noqa: BLE001 — vòng nền không được chết
+            job.log_line("[append] error: %s" % str(exc)[:160])
+        # Không còn task nào chạy -> đóng job (phần thêm đã xong)
+        with job._lock:
+            still = any(t.status == "running" for t in job.tasks.values())
+        if not still:
+            job.duration_ms = int((time.time() - job._t0) * 1000)
+            job.finished_at = _now()
+            job.status = "stopped" if job.stop_requested else "done"
+            job.emit({"type": "job_done", "job_id": job.job_id, "ok": job.ok, "fail": job.fail,
+                      "done": job.done, "total": job.total, "status": job.status,
+                      "duration_ms": job.duration_ms, "stop_reason": job.stop_reason})
+            job.write_results()
+
+    threading.Thread(target=_run_added, name=f"append-{job_id}", daemon=True).start()
+    return {"ok": True, "added": len(new_ids), "skipped": skipped, "total": job.total}
 
 
 def job_stats(job: Job) -> dict:

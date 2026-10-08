@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -35,49 +36,286 @@ SENTINEL_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 )
 
+# Hồ sơ browser cho Sentinel: (screen_width, screen_height, cores, memory, weight).
+#
+# Vì sao phải khác nhau theo device: token `p` mà SDK sinh ra có chứa
+# screen.width+height, hardwareConcurrency, timezone (xem sentinel_runner.js).
+# Trước đây mọi task gửi đúng một bộ số (screen mặc định 2400x1080 -> tổng 3480,
+# cores 8) nên hàng trăm account khác nhau lại khai cùng một "máy" — chỉ cần nhìn
+# trường đó là thấy một farm. Ở đây mỗi device_id bốc một hồ sơ cố định: trong
+# cùng task (2–5 lần gọi sentinel) vẫn là một máy, khác task là khác máy.
+#
+# Trọng số = thị phần THẬT của 6 độ phân giải desktop phổ biến nhất ở Ấn Độ
+# (StatCounter "Desktop Screen Resolution Stats — India", 9/2026), đã chuẩn hoá
+# về 100%. Lấy bảng Ấn Độ vì persona của flow này là IN (proxy IN + en-IN +
+# Asia/Kolkata). 1920x1080 được tách theo số core vì cả laptop 8 core lẫn desktop
+# 12–16 core đều dùng độ phân giải này; cores là số *logical processor* vì Chrome
+# báo hardwareConcurrency theo logical.
+#
+# KHÔNG random UA: UA phải khớp TLS impersonate chrome146 + sec-ch-ua của mọi
+# request khác trong flow, lệch là mâu thuẫn nặng hơn cả việc trùng fingerprint.
+_DEVICE_PROFILES = (
+    (1920, 1080, 8, 8, 8.40),
+    (1920, 1080, 12, 8, 6.30),
+    (1920, 1080, 16, 8, 4.02),
+    (1536, 864, 8, 8, 14.46),
+    (1366, 768, 4, 4, 16.45),
+    (1280, 720, 4, 4, 6.79),
+    (1440, 900, 8, 8, 3.83),
+    (1600, 900, 8, 8, 3.58),
+)
+_DEVICE_PROFILE_TOTAL = sum(row[4] for row in _DEVICE_PROFILES)
 
-def sentinel_headers(device_id: str, proxy: str, timeout: int = 35) -> dict[str, str]:
-    """Chạy Sentinel SDK (node) lấy OpenAI-Sentinel-Token — qua risk engine OpenAI."""
+
+def sentinel_fingerprint(device_id: str) -> dict[str, Any]:
+    """Persona browser ổn định theo device_id (cùng device = cùng máy, khác device = khác máy).
+
+    timezone/locale lấy từ UPI_BROWSER_TIMEZONE / UPI_BROWSER_LOCALE (giống
+    extract_cs.payment_browser_timezone) để persona sentinel không lệch với
+    phần Stripe/checkout còn lại.
+    """
+    digest = hashlib.sha256(f"sentinel-fp|{device_id}".encode("utf-8")).digest()
+    point = int.from_bytes(digest[:8], "big") / float(1 << 64) * _DEVICE_PROFILE_TOTAL
+    width, height, cores, memory = _DEVICE_PROFILES[-1][:4]
+    cumulative = 0.0
+    for row_width, row_height, row_cores, row_memory, weight in _DEVICE_PROFILES:
+        cumulative += weight
+        if point < cumulative:
+            width, height, cores, memory = row_width, row_height, row_cores, row_memory
+            break
+    locale = str(os.environ.get("UPI_BROWSER_LOCALE") or "en-IN").strip() or "en-IN"
+    timezone = str(os.environ.get("UPI_BROWSER_TIMEZONE") or "Asia/Kolkata").strip() or "Asia/Kolkata"
+    languages = [locale]
+    for tag in ("en-US", locale.split("-")[0], "en"):
+        if tag and tag not in languages:
+            languages.append(tag)
+    return {
+        "user_agent": SENTINEL_UA,
+        "language": locale,
+        "languages": languages,
+        "platform": "Win32",
+        "timezone": timezone,
+        "screen_width": width,
+        "screen_height": height,
+        "hardware_concurrency": cores,
+        "device_memory": memory,
+    }
+
+
+# Cache sentinel token theo (device_id, proxy) TRONG CÙNG tiến trình.
+#
+# Vì sao: đo thật — sentinel mất **1,1s khi không qua proxy** nhưng **17,6s khi qua
+# proxy residential** (độ trễ proxy, không phải CPU). Một task gọi
+# `build_chatgpt_session` 2–5 lần (checkout, promotion, tax, snapshot, mỗi round retry)
+# và MỖI lần đều gọi sentinel -> phí 17–70s/task, đúng phần khiến task của mình
+# ~100–200s trong khi flow tham khảo chỉ 34s.
+#
+# device_id là duy nhất cho từng task, và cache sống trong 1 tiến trình con
+# (extract_cs chạy mới mỗi task) -> không có chuyện dùng token của task khác.
+# Tắt bằng UPI_SENTINEL_REUSE=0 nếu nghi token chỉ dùng được 1 lần.
+_SENTINEL_CACHE: dict[str, tuple[float, dict[str, str]]] = {}
+# Cap an toàn cho cache khi runner KHÔNG trả được expires_at. Đo thật: server
+# /sentinel/req trả expire_after = 540s, nên 600s cũ là ĐỦ để dùng token quá hạn ~60s.
+# Luôn ưu tiên expires_at từ runner (min(expires_at, now + _SENTINEL_TTL)).
+_SENTINEL_TTL = float(os.environ.get("UPI_SENTINEL_TTL") or 480)
+_SENTINEL_REUSE = str(os.environ.get("UPI_SENTINEL_REUSE", "1")).strip().lower() not in (
+    "0", "false", "no", "off")
+
+
+_BOOTSTRAP_VERSION_CACHE = ROOT / ".cache" / "sentinel-bootstrap-version-py.json"
+
+
+def _resolve_sdk_version_cffi(proxy: str, timeout: int) -> str:
+    """Đọc version SDK từ bootstrap bằng curl_cffi (Chrome TLS/h2), cache 6h.
+
+    Vì sao: trước đây node tự GET /backend-api/sentinel/sdk.js bằng node https
+    (h1.1) ở lần chạy đầu mỗi 6h — cũng là một request browser thấy được. Chuyển
+    sang curl_cffi cho đồng bộ TLS. Trả "" nếu thất bại -> node tự lo (fallback).
+    """
+    try:
+        if _BOOTSTRAP_VERSION_CACHE.exists():
+            raw = json.loads(_BOOTSTRAP_VERSION_CACHE.read_text(encoding="utf-8"))
+            if isinstance(raw, dict) and raw.get("version") and \
+                    time.time() - float(raw.get("ts") or 0) < 6 * 3600:
+                return str(raw["version"])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from curl_cffi.requests import Session as CffiSession
+        session = CffiSession(impersonate="chrome146")
+        if proxy:
+            session.proxies = {"http": proxy, "https": proxy}
+        for url in ("https://chatgpt.com/backend-api/sentinel/sdk.js",
+                    "https://sentinel.openai.com/backend-api/sentinel/sdk.js"):
+            try:
+                resp = session.get(url, headers={"Accept": "*/*", "User-Agent": SENTINEL_UA}, timeout=timeout)
+                m = re.search(r"/sentinel/([0-9a-z]+)/sdk\.js", resp.text or "")
+                if m and resp.status_code == 200:
+                    version = m.group(1)
+                    try:
+                        _BOOTSTRAP_VERSION_CACHE.parent.mkdir(parents=True, exist_ok=True)
+                        _BOOTSTRAP_VERSION_CACHE.write_text(
+                            json.dumps({"version": version, "ts": time.time()}), encoding="utf-8")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return version
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+_CHROME146_CH = (
+    "\"Chromium\";v=\"146\", \"Not.A/Brand\";v=\"24\", \"Google Chrome\";v=\"146\""
+)
+
+
+def _run_node(request: dict, timeout: int) -> dict:
+    """Chạy sentinel_runner.js 1 lần, trả dict (rỗng nếu node lỗi/timeout)."""
     node = shutil.which("node") or "node"
-    request = {
+    try:
+        completed = subprocess.run(
+            [node, str(SENTINEL_RUNNER)],
+            input=json.dumps(request, separators=(",", ":")),
+            text=True,
+            capture_output=True,
+            timeout=max(45, timeout + 10),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {}
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except (ValueError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _fetch_challenge_cffi(request_p: str, device_id: str, sdk_version: str,
+                          proxy: str, fp: dict, timeout: int,
+                          cookies: str | None = None) -> dict | None:
+    """POST /sentinel/req bằng curl_cffi impersonate chrome146.
+
+    Vì sao: request này trong browser thật đi bằng TLS của Chrome (JA3) + HTTP/2 +
+    client hint; node `https` chỉ làm được h1.1 + JA3 của Node. curl_cffi với
+    `impersonate=chrome146` sao lại đúng bộ TLS/h2 của Chrome. Trả None để caller
+    rơi về đường node tự fetch (không bao giờ vì vậy mà mất token).
+    """
+    try:
+        from curl_cffi.requests import Session as CffiSession
+    except Exception:  # noqa: BLE001 — thiếu curl_cffi thì rơi về node
+        return None
+    try:
+        session = CffiSession(impersonate="chrome146")
+        if proxy:
+            session.proxies = {"http": proxy, "https": proxy}
+        lang = fp.get("languages") or [fp.get("language") or "en-IN"]
+        headers = {
+            "Accept": "*/*",
+            "Accept-Language": ",".join(lang),
+            "Content-Type": "text/plain;charset=UTF-8",
+            "Origin": "https://chatgpt.com",
+            "Referer": f"https://chatgpt.com/backend-api/sentinel/frame.html?sv={sdk_version}",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "User-Agent": fp.get("user_agent") or SENTINEL_UA,
+            "sec-ch-ua": _CHROME146_CH,
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": "\"Windows\"",
+            "sec-ch-ua-full-version-list":
+                "\"Chromium\";v=\"146.0.0.0\", \"Not.A/Brand\";v=\"24\", \"Google Chrome\";v=\"146.0.0.0\"",
+            "sec-ch-ua-platform-version": "\"10.0.0\"",
+            "sec-ch-ua-arch": "\"x86\"",
+            "sec-ch-ua-bitness": "\"64\"",
+            "Cookie": cookies or f"oai-did={device_id}",
+        }
+        resp = session.post(
+            "https://chatgpt.com/backend-api/sentinel/req",
+            data=json.dumps({"p": request_p, "id": device_id, "flow": "chatgpt_checkout"}),
+            headers=headers,
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            return None
+        return resp.json() if isinstance(resp.json(), dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def sentinel_headers(device_id: str, proxy: str, timeout: int = 45,
+                      alt_proxies: tuple[str, ...] = (),
+                      cookies: str | None = None) -> dict[str, str]:
+    """Lấy OpenAI-Sentinel-Token, request /req đi bằng curl_cffi (giống Chrome thật).
+
+    Chia 2 pha để pha HTTP giữa chừng đi bằng TLS/h2 của Chrome thay vì Node:
+      1. node chạy SDK -> `request_p` (offline, không gọi mạng /req).
+      2. Python (curl_cffi chrome146) POST /req lấy challenge — có JA3 + h2 + CH.
+      3. node giải proof (turnstile + PoW) từ challenge -> token + so_token.
+    Nếu curl_cffi thiếu/lỗi thì rơi về đường node tự fetch (hành vi cũ), nên không
+    bao giờ mất token vì lý do này.
+
+    Retry 3 lần có backoff; có `alt_proxies` thì lần 2/3 đổi proxy. Cache theo hạn
+    THẬT `expires_at` do server trả (~540s), không dùng token quá hạn như bản cũ.
+    """
+    candidates = (proxy,) + tuple(p for p in alt_proxies if p and p != proxy)
+    cache_key = f"{device_id}|{proxy}"
+    if _SENTINEL_REUSE:
+        hit = _SENTINEL_CACHE.get(cache_key)
+        if hit and hit[1] and time.time() < hit[0]:
+            return dict(hit[1])
+
+    fp = sentinel_fingerprint(device_id)
+    resolved_version = _resolve_sdk_version_cffi(proxy, timeout)
+    base = {
         "flow": "chatgpt_checkout",
         "persona": "chatgpt",
         "device_id": device_id,
         "session_id": device_id,
-        "proxy": proxy or "",
         "sentinel_sdk_url": SENTINEL_SDK_URL,
         "timeout_ms": min(120.0, max(10.0, timeout * 1000)),
-        "fingerprint": {
-            "user_agent": SENTINEL_UA,
-            "language": "en-IN",
-            "languages": ["en-IN", "en-US", "en"],
-            "platform": "Win32",
-            "timezone": "Asia/Kolkata",
-            "hardware_concurrency": 8,
-            "device_memory": 8,
-        },
+        "fingerprint": fp,
     }
-    completed = subprocess.run(
-        [node, str(SENTINEL_RUNNER)],
-        input=json.dumps(request, separators=(",", ":")),
-        text=True,
-        capture_output=True,
-        timeout=max(30, timeout + 10),
-        check=False,
-    )
-    try:
-        payload = json.loads(completed.stdout or "{}")
-    except (ValueError, json.JSONDecodeError):
-        payload = {}
-    token = str(payload.get("token") or "") if isinstance(payload, dict) else ""
-    headers: dict[str, str] = {}
-    if token:
-        headers["OpenAI-Sentinel-Token"] = token
-        headers["OAI-Telemetry"] = "[1,null]"
-    so_token = str(payload.get("so_token") or "") if isinstance(payload, dict) else ""
-    if so_token:
-        headers["OpenAI-Sentinel-SO-Token"] = so_token
-    return headers
+    # Python đã resolve version bằng curl_cffi -> node không phải GET bootstrap nữa.
+    if resolved_version:
+        base["sentinel_sdk_version"] = resolved_version
+    for attempt in range(3):
+        candidate = candidates[min(attempt, len(candidates) - 1)]
+        # Pha 1: request_p (offline qua SDK)
+        req = {**base, "proxy": candidate or "", "action": "requirements_only"}
+        ph1 = _run_node(req, timeout)
+        request_p = str(ph1.get("request_p") or "")
+        sdk_version = str(ph1.get("sdk_version") or ph1.get("diagnostics", {}).get("sdk_version") or "")
+        if not request_p:
+            if attempt + 1 < 3:
+                time.sleep(0.5 + attempt * 1.0)
+            continue
+
+        # Pha 2: lấy challenge bằng curl_cffi (Chrome TLS/h2). Fallback node nếu thất bại.
+        challenge = _fetch_challenge_cffi(request_p, device_id, sdk_version, candidate, fp, timeout,
+                                         cookies=cookies)
+        if challenge is None:
+            payload = _run_node({**base, "proxy": candidate or ""}, timeout)
+        else:
+            # Pha 3: node giải proof từ challenge Python vừa lấy
+            payload = _run_node({**base, "proxy": candidate or "", "action": "solve",
+                                 "request_p": request_p, "challenge": json.dumps(challenge)}, timeout)
+
+        token = str(payload.get("token") or "")
+        so_token = str(payload.get("so_token") or "")
+        if token:
+            headers = {"OpenAI-Sentinel-Token": token, "OAI-Telemetry": "[1,null]"}
+            if so_token:
+                headers["OpenAI-Sentinel-SO-Token"] = so_token
+            if _SENTINEL_REUSE:
+                expires_at = float(payload.get("expires_at") or 0) or (time.time() + _SENTINEL_TTL)
+                expires_at = min(expires_at, time.time() + _SENTINEL_TTL)
+                _SENTINEL_CACHE[cache_key] = (expires_at, dict(headers))
+            return headers
+        if attempt + 1 < 3:
+            time.sleep(0.5 + attempt * 1.0)
+    return {}
 
 
 def warmup_csrf(session: Any, timeout: int) -> None:

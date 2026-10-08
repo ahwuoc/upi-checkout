@@ -85,7 +85,7 @@ STEPS_OAICS: list[tuple[str, str]] = [
 ]
 
 STEPS_CS: list[tuple[str, str]] = [
-    ("runner", "Start cs_runner (sentinel)"),
+    ("runner", "Initialize CS flow"),
     ("checkout", "Create checkout"),
     ("promo", "Apply promotion"),
     ("stripe_init", "Initialize payment page"),
@@ -240,17 +240,71 @@ EGRESS_PROBE_URL = "https://ipwho.is/"
 
 
 def probe_egress(proxy: str, timeout: int = 20) -> dict:
-    """Đo IP thật mà proxy xuất ra (qua ipwho.is). Trả {} nếu lỗi/timeout."""
+    """Đo IP thật mà proxy xuất ra + chấm chất lượng, qua ippure.com.
+
+    Vì sao đổi từ findip sang ippure: ippure trả thông tin của CHÍNH IP đang gọi
+    nên gộp được "đo exit" và "chấm chất lượng" vào 1 request (bản cũ tốn 2:
+    ipwho.is + findip.lookup theo IP). Và bộ điểm của ippure (fraudScore,
+    isResidential, isBroadcast) nhắm đúng bài toán IP cho dịch vụ AI.
+
+    Key giữ nguyên tên cũ (risk/verdict/user_type) vì UI egress đang đọc chúng;
+    các key mới (fraud_score/is_residential/is_broadcast) thêm vào cho ai cần.
+
+    Trả {} nếu lỗi/timeout.
+    """
     if not proxy:
         return {}
     t0 = time.time()
+    probe: dict = {}
+    try:
+        import ippure  # noqa: PLC0415
+        probe = ippure.probe_exit(proxy, timeout) or {}
+    except Exception:  # noqa: BLE001 — loi mang/module thi roi ve ipwho.is
+        probe = {}
+
+    if probe.get("quality_present"):
+        fraud = probe.get("fraud_score")
+        if not isinstance(fraud, (int, float)):
+            verdict = ""
+        elif fraud <= 10:
+            verdict = "clean"
+        elif fraud <= 30:
+            verdict = "medium"
+        else:
+            verdict = "dirty"
+        is_res = probe.get("is_residential")
+        return {
+            "ip": str(probe.get("ip") or ""),
+            "country": str(probe.get("country") or ""),
+            "city": str(probe.get("city") or ""),
+            "region": str(probe.get("region") or ""),
+            "ip_type": str(probe.get("family") or ""),      # "IPv4" / "IPv6"
+            "asn": probe.get("asn"),
+            "org": str(probe.get("isp") or ""),
+            "isp": str(probe.get("isp") or ""),
+            "domain": "",
+            "latency_ms": probe.get("latency_ms") or int((time.time() - t0) * 1000),
+            "timezone": str(probe.get("timezone") or ""),
+            "ippure": True,
+            "fraud_score": int(fraud) if isinstance(fraud, (int, float)) else None,
+            "is_residential": is_res,
+            "is_broadcast": probe.get("is_broadcast"),
+            "is_hosting": probe.get("is_broadcast"),
+            # Tên cũ để UI/probe khác không phải sửa
+            "risk": int(fraud) if isinstance(fraud, (int, float)) else None,
+            "verdict": verdict,
+            "user_type": ("residential" if is_res else
+                          "non-residential" if is_res is False else ""),
+        }
+
+    # ippure không trả được (Cloudflare chặn / IPv6 không có dữ liệu chất lượng)
+    # -> rơi về ipwho.is để vẫn đo được exit, chỉ thiếu phần chất lượng.
     try:
         g = requests.get(EGRESS_PROBE_URL,
                          headers={"User-Agent": "Mozilla/5.0 (compatible; momo-checkout/1.0)"},
                          proxies={"http": proxy, "https": proxy}, timeout=timeout).json()
     except Exception:  # noqa: BLE001 — probe loi thi coi nhu khong do duoc
         return {}
-    latency_ms = int((time.time() - t0) * 1000)
     if not isinstance(g, dict) or not g.get("ip"):
         return {}
     conn = g.get("connection") or {}
@@ -258,12 +312,14 @@ def probe_egress(proxy: str, timeout: int = 20) -> dict:
             "country": str(g.get("country_code") or ""),
             "city": str(g.get("city") or ""),
             "region": str(g.get("region") or ""),
-            "ip_type": str(g.get("type") or ""),          # "IPv4" / "IPv6"
+            "ip_type": str(g.get("type") or ""),
             "asn": conn.get("asn"),
             "org": str(conn.get("org") or ""),
             "isp": str(conn.get("isp") or ""),
             "domain": str(conn.get("domain") or ""),
-            "latency_ms": latency_ms}
+            "latency_ms": int((time.time() - t0) * 1000),
+            "risk": None, "verdict": "", "user_type": "",
+            "fraud_score": None, "is_residential": None, "is_broadcast": None}
 
 
 # ---------- cham diem proxy (chon proxy sach / risk thap truoc khi chay) ----------
@@ -310,6 +366,45 @@ def proxy_history(proxy: str) -> dict:
     return {"success": ok, "fail": fail, "last_reason": last_reason}
 
 
+def proxy_persona_timezone() -> str:
+    """Timezone persona đang khai (khớp sentinel + Stripe browser_timezone)."""
+    try:
+        import extract_cs as ecs  # noqa: PLC0415
+        return str(ecs.payment_browser_timezone() or "Asia/Kolkata")
+    except Exception:  # noqa: BLE001
+        return "Asia/Kolkata"
+
+
+def ippure_verdict(info: dict, target_country: str, hist: dict, timeout: int = 20) -> dict:
+    """Chấm proxy bằng ippure (fraudScore + isResidential + isBroadcast).
+
+    Khác bản findip: KHÔNG tra thêm theo IP nữa. ippure trả thông tin của chính
+    IP đang gọi, mà `probe_egress()` đã đi qua proxy rồi — nên chất lượng đã nằm
+    sẵn trong `info`, không cần request thứ hai (bản cũ tốn 2: ipwho + lookup).
+
+    Trả {} khi không có dữ liệu chất lượng, để rơi về cách chấm theo từ khoá ISP.
+    """
+    try:
+        import ippure  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return {}
+    ip = str(info.get("ip") or "")
+    if not ip:
+        return {}
+    if info.get("fraud_score") is None and info.get("is_residential") is None:
+        return {}          # ipwho.is fallback: không có phần chất lượng
+    probe = {"ip": ip, "country": info.get("country") or "",
+             "latency_ms": info.get("latency_ms"),
+             "timezone": info.get("timezone") or "",
+             "family": "IPv6" if ":" in ip else "IPv4",
+             "asn": info.get("asn"), "isp": info.get("isp") or "",
+             "fraud_score": info.get("fraud_score"),
+             "is_residential": info.get("is_residential"),
+             "is_broadcast": info.get("is_broadcast"),
+             "source": "ippure", "quality_present": True}
+    return ippure.judge(probe, target_country, proxy_persona_timezone(), hist)
+
+
 def score_proxy(proxy: str, target_country: str = "IN", timeout: int = 20,
                 egress: dict | None = None) -> dict:
     """Cham diem 0..100 cho 1 proxy. `grade` A/B/C/F; F = khong nen dung."""
@@ -328,6 +423,21 @@ def score_proxy(proxy: str, target_country: str = "IN", timeout: int = 20,
            "isp": info.get("isp") or "", "asn": info.get("asn"),
            "latency_ms": info.get("latency_ms"), "history": hist,
            "flags": [], "score": 0, "grade": "F"}
+
+    judged = ippure_verdict(info, target_country, hist, timeout)
+    if judged:
+        # ippure là bên chấm điểm; các key đo được vẫn giữ nguyên như bản cũ
+        res.update({"ok": bool(judged.get("ok")), "risk": judged.get("risk"),
+                    "verdict": judged.get("verdict") or "",
+                    "user_type": judged.get("user_type") or "",
+                    "connection_type": judged.get("connection_type") or "",
+                    "timezone": judged.get("timezone") or "",
+                    "exit_family": judged.get("family") or "",
+                    "flags": list(judged.get("flags") or []),
+                    "reasons": list(judged.get("reasons") or []),
+                    "score": int(judged.get("score") or 0),
+                    "grade": judged.get("grade") or "F"})
+        return res
 
     flags = res["flags"]
     if not res["ok"]:
@@ -752,12 +862,18 @@ def make_step_advancer(step: StepHook, order: list[str]) -> tuple[StepHook, dict
     Tien do DON DIEU: cac vong retry se lap lai marker cu, nhung buoc da di qua
     thi khong bi keo nguoc ve `active` — neu khong se co 2 buoc cung sang.
     """
-    state = {"reached": order.index("checkout") if "checkout" in order else 0}
+    state = {"reached": order.index("checkout") if "checkout" in order else 0,
+             "skipped": set()}
 
     def advance(key: str, completed: bool) -> None:
         if key not in order:
             return
         i = order.index(key)
+        # Bước đã bị đánh dấu skip thì không được ghi đè thành active/done — nếu không
+        # UI lại hiện ✓ cho bước chưa hề chạy (đúng cái gây nhầm "Apply promotion ✓"
+        # trong khi thực tế nó bị bỏ qua).
+        if key in state["skipped"]:
+            return
         if i < state["reached"]:
             # buoc da di qua roi (marker lap lai o vong sau) -> giu nguyen, khong active lai
             if completed:
@@ -765,11 +881,19 @@ def make_step_advancer(step: StepHook, order: list[str]) -> tuple[StepHook, dict
             return
         if i > state["reached"]:
             for k in order[state["reached"]:i]:
-                step(k, "done")
+                if k not in state["skipped"]:
+                    step(k, "done")
             state["reached"] = i
         step(key, "done" if completed else "active")
 
-    return advance, state
+    def mark_skip(key: str, detail: str = "") -> None:
+        """Bước bị BỎ QUA (không phải chạy xong) -> UI hiện (Skipped) với icon nét đứt."""
+        if key not in order:
+            return
+        state["skipped"].add(key)
+        step(key, "skip", detail=detail)
+
+    return advance, state, mark_skip
 
 
 def is_risk_decline(lines: list[str]) -> bool:
@@ -905,7 +1029,15 @@ def cs_subprocess_one(token: str, proxy_path: Path, promo: str, state_dir: Path,
     # `reached` = chi so buoc xa nhat da toi -> chi tien, khong lui (cac vong retry
     # se lap lai marker nhung buoc da xong khong bi tut ve pending).
     order = [k for k, _ in STEPS_CS]
-    advance, adv = make_step_advancer(step, order)
+    advance, adv, mark_skip = make_step_advancer(step, order)
+
+    # Bước chắc chắn không chạy trong cấu hình này -> đánh dấu skip NGAY, để bộ đánh
+    # dấu tiến trình không điền ✓ cho nó khi các bước sau xuất hiện.
+    _truthy = ("1", "true", "yes", "on")
+    if str(os.environ.get("UPI_UPDATE_TAX_REGION", "")).strip().lower() not in _truthy:
+        mark_skip("tax", "disabled (UPI_UPDATE_TAX_REGION=0)")
+    if str(os.environ.get("UPI_CONFIRM_INLINE_PM", "")).strip().lower() in _truthy:
+        mark_skip("pm", "inline PM at confirm (UPI_CONFIRM_INLINE_PM=1)")
 
     lines: list[str] = []
     err = ""
@@ -930,6 +1062,11 @@ def cs_subprocess_one(token: str, proxy_path: Path, promo: str, state_dir: Path,
         on_log(line)
         if "all failed:" in line and not err:
             err = line.split("all failed: ")[-1][:200]
+        low = line.lower()
+        if "skipping apply promotion" in low:
+            mark_skip("promo", "checkout already ₹0 — skipped checkout/update")
+        elif "upi confirm inline details:" in low:
+            mark_skip("pm", "inline PM at confirm")
         hit = cs_stage_for_line(line)
         if hit:
             advance(hit[0], hit[1])
@@ -978,6 +1115,9 @@ def cs_subprocess_one(token: str, proxy_path: Path, promo: str, state_dir: Path,
     # Lý do + số tiền đã nằm trong `err` để tra cứu.
     return {"email": decode_email(token), "status": st,
             "risk_decline": is_risk_decline(lines),
+            # Account không được hưởng promo 0₫ -> engine không retry (giống risk decline).
+            "promo_not_eligible": ("promo_not_eligible" in (err or "")
+                                   or "promo_not_eligible" in text),
             "upi_link": (link or None) if st == "LINK" else None,
             # Ảnh QR Stripe trả kèm (qr.stripe.com). Chỉ trả khi task thành công —
             # cùng lý do với upi_link ở trên.
@@ -1070,12 +1210,74 @@ def scan_one(token: str, proxy: str, country: str = "IN",
 
 
 # ---------- run ----------
+def order_pool_by_quality(proxies: list[str], target_country: str = "IN",
+                          workers: int = 16, timeout: int = 20,
+                          task_count: int = 0) -> list[str]:
+    """Xếp pool theo điểm chất lượng trước khi chia cho worker; bỏ proxy grade F.
+
+    Vì sao: `run()` chia proxy theo vòng tròn `proxies[i % len]`, nên chỉ cần
+    trong pool có proxy chết / ra sai nước / IP đã bị gắn cờ là có task dùng đúng
+    con đó và fail. Ở đây chấm 1 lượt song song (có cache 12h theo IP) rồi:
+      - xếp điểm cao trước, để worker nhận proxy tốt trước khi pool cạn
+      - bỏ grade F; nếu bỏ hết thì giữ nguyên pool cũ (không để chết vì lọc)
+    Tắt bằng UPI_PROXY_QUALITY=0.
+    """
+    if not proxies:
+        return proxies
+    if str(os.environ.get("UPI_PROXY_QUALITY") or "1").strip().lower() in ("0", "false", "no", "off"):
+        return proxies
+    try:
+        import ippure  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return proxies
+    if not ippure.enabled():
+        return proxies
+    t0 = time.time()
+    limit = max(1, min(int(os.environ.get("UPI_PROXY_QUALITY_WORKERS") or 16), 32))
+    rows = ippure.scan(proxies, target_country, proxy_persona_timezone(),
+                       workers=limit, timeout=timeout, history_of=proxy_history)
+    good = [r["proxy"] for r in rows if str(r.get("grade")) in ("A", "B", "C")]
+    # Sinh bù khi pool không đủ cho số task (xem proxy_pool.py: session id tự bịa vẫn
+    # chạy và mỗi session ra một IP khác -> không bị giới hạn ở số dòng dán tay).
+    generated = {}
+    short = max(0, int(task_count) - len(good))
+    if short and proxies and str(os.environ.get("UPI_PROXY_GENERATE") or "1").strip().lower() not in ("0", "false", "no", "off"):
+        try:
+            import proxy_pool  # noqa: PLC0415
+            extra, gen = proxy_pool.harvest(proxies[0], short, "B", target_country,
+                                            proxy_persona_timezone(),
+                                            workers=max(4, min(16, short * 2)), timeout=timeout,
+                                            max_attempts=int(os.environ.get("UPI_PROXY_GENERATE_MAX") or 0) or short * 6,
+                                            sess_time=int(os.environ.get("UPI_PROXY_SESS_TIME") or 30),
+                                            log=lambda *a: None)
+            if extra:
+                good += [r["proxy"] for r in extra]
+                generated = {k: gen.get(k) for k in ("verified", "attempts", "unique_ips", "seconds")}
+        except Exception as exc:  # noqa: BLE001 — sinh loi thi dung pool cu
+            generated = {"error": f"{type(exc).__name__}: {str(exc)[:100]}"}
+    best = rows[0] if rows else {}
+    out({"type": "proxy_quality", "scanned": len(rows), "usable": len(good),
+         "seconds": round(time.time() - t0, 1),
+         "best": {"grade": best.get("grade"), "score": best.get("score"),
+                  "country": best.get("country"), "risk": best.get("risk"),
+                  "user_type": best.get("user_type"), "family": best.get("family")},
+         "generated": generated,
+         "dropped": [{"label": r.get("label"), "grade": r.get("grade"),
+                      "flags": r.get("flags")}
+                     for r in rows if str(r.get("grade")) not in ("A", "B", "C")][:10]})
+    return good or proxies
+
+
 def run(mode: str, tokens: list[str], proxy_path: str, workers: int,
-        promo: str, country: str) -> None:
+        promo: str, country: str, retries: int = 1) -> None:
     setup()
     proxy_file = Path(proxy_path) if proxy_path else (HERE / "proxy.txt")
     proxies = load_proxies(proxy_file)
     n = len(tokens)
+    # Xếp hạng (và sinh bù nếu thiếu) TRƯỚC khi chia proxy cho worker — cần biết số
+    # task mới biết pool có đủ proxy chất lượng không.
+    proxies = order_pool_by_quality(proxies, country, workers=max(4, min(workers * 4, 32)),
+                                    task_count=n)
     state_dir = HERE / "cs_state"
     state_dir.mkdir(exist_ok=True)
     seed_file = state_dir / f"cli_seed_{os.getpid()}.txt"
@@ -1092,14 +1294,14 @@ def run(mode: str, tokens: list[str], proxy_path: str, workers: int,
         elif mode in ("qr", "oaics"):
             r = oaics_one(token, proxy, country, promo)
         elif mode == "cs":
-            r = cs_subprocess_one(token, seed_file, promo, state_dir, i)
+            r = cs_subprocess_one(token, seed_file, promo, state_dir, i, retry_limit=retries)
         else:
             # auto / batch: dò kind rồi chạy đúng logic (cs_ → cs, oaics_ → confirmation_tokens)
             d = detect_one(token, proxy, country)
             if d.get("kind") == "oaics":
                 r = oaics_one(token, proxy, country, promo)
             else:
-                r = cs_subprocess_one(token, seed_file, promo, state_dir, i)
+                r = cs_subprocess_one(token, seed_file, promo, state_dir, i, retry_limit=retries)
         results.append(r)
         return r
 
@@ -1124,6 +1326,9 @@ def main() -> int:
     p.add_argument("--proxy", default=None,
                    help="File proxy (mặc định dùng proxy.txt)")
     p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--retries", type=int, default=1,
+                   help="Số lần thử lại mỗi acc khi bị risk decline (1-5). Mỗi lần thử\n"
+                        "dùng device_id + phiên proxy MỚI, chạy tuần tự.")
     p.add_argument("--promo", default="off")
     p.add_argument("--country", default="IN")
     args = p.parse_args()
@@ -1138,10 +1343,10 @@ def main() -> int:
     if not tokens:
         print(json.dumps({"error": "no tokens"}), flush=True)
         return 2
-    run(args.mode, tokens, args.proxy, args.workers, args.promo, args.country)
+    run(args.mode, tokens, args.proxy, args.workers, args.promo, args.country,
+        retries=max(1, min(5, args.retries)))
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-

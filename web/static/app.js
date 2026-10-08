@@ -38,10 +38,8 @@ const MODE_HINTS = {
 // CHỈ 'LINK' là thành công (có link/QR để quét). Mọi raw status khác đều là thất bại.
 // Trần token mỗi batch — phải khớp MAX_TOKENS_PER_BATCH bên web/engine.py.
 const MAX_TOKENS = 1000;
-// Trần worker — phải khớp `le=64` trong web/app.py (server là nơi phán cuối).
-// Ngưỡng cảnh báo RAM: mỗi task là 1 subprocess extract_cs ~70 MB.
-const MAX_WORKERS = 64;
-const RAM_WARN_WORKERS = 40;
+// Trần worker — phải khớp `le=100` trong web/app.py (server là nơi phán cuối).
+const MAX_WORKERS = 200;
 
 // Số nhiều tiếng Anh: 1 task / 2 tasks. Dùng cho mọi chuỗi có đếm.
 function plural(n) { return n === 1 ? '' : 's'; }
@@ -78,6 +76,10 @@ const els = {
   overallCount: document.getElementById('overall-count'),
   btnSuccess: document.getElementById('btn-success'),
   btnRefresh: document.getElementById('btn-refresh'),
+  pushQueue: document.getElementById('push-queue'),
+  pushQueueCount: document.getElementById('push-queue-count'),
+  btnCopyEmails: document.getElementById('btn-copy-emails'),
+  btnCopyEmailsLabel: document.getElementById('btn-copy-emails-label'),
   btnClearTab: document.getElementById('btn-clear-tab'),
   btnClearTabLabel: document.getElementById('btn-clear-tab-label'),
   btnNotify: document.getElementById('btn-notify'),
@@ -111,10 +113,6 @@ const els = {
   poolStatus: document.getElementById('pool-status'),
   poolCount: document.getElementById('pool-count'),
   poolClear: document.getElementById('pool-clear'),
-  poolScan: document.getElementById('pool-scan'),
-  useFilter: document.getElementById('use-filter'),
-  minScore: document.getElementById('min-score'),
-  scanResult: document.getElementById('scan-result'),
   country: document.getElementById('country'),
   promo: document.getElementById('promo'),
   workers: document.getElementById('workers'),
@@ -123,6 +121,7 @@ const els = {
   summaryTotal: document.getElementById('summary-total'),
   warning: document.getElementById('warning'),
   submit: document.getElementById('submit'),
+  stopNote: document.getElementById('stop-note'),
   historyBox: document.getElementById('history-box'),
   historyList: document.getElementById('history-list'),
   historyCount: document.getElementById('history-count'),
@@ -375,8 +374,10 @@ function stepHtml(s) {
   const cls = 'step step-' + (s.status || 'pending');
   const detailText = s.err || s.detail;
   const detail = detailText ? '<div class="step-detail muted">' + esc(detailText) + '</div>' : '';
+  // Bước bị BỎ QUA (không chạy) -> ghi rõ "(Skipped)" như tool tham khảo, thay vì
+  // hiện ✓ khiến tưởng nó đã gọi API.
   const label = s.status === 'skip'
-    ? '<div class="step-label muted strike">' + esc(s.label) + '</div>'
+    ? '<div class="step-label muted strike">' + esc(s.label) + ' (Skipped)</div>'
     : '<div class="step-label">' + esc(s.label) + '</div>';
   return '<div class="' + cls + '"><span class="step-icon">' + stepIcon(s.status) + '</span>' +
     '<div class="step-text">' + label + detail + '</div></div>';
@@ -418,6 +419,18 @@ function flowCardHtml(t) {
       html += '<div class="egress-row"><span>Billing geo</span><span>' +
               esc(e.billing_geo.location) + (e.billing_geo.approx ? ' <span class="muted">(approx)</span>' : '') +
               '</span></div>';
+    }
+    if (ex.risk != null || ex.verdict) {
+      // ippure chấm IP exit: risk (fraudScore 0..100) + verdict + user_type
+      // (residential vs non-residential). Có từ probe_egress() ở cli.py.
+      const bits = [];
+      if (ex.risk != null) bits.push('risk ' + ex.risk);
+      if (ex.verdict) bits.push(ex.verdict);
+      if (ex.user_type) bits.push(ex.user_type);
+      if (ex.isp) bits.push(ex.isp);
+      if (ex.latency_ms != null) bits.push(ex.latency_ms + 'ms');
+      html += '<div class="egress-row"><span>IP quality</span><span>' +
+              esc(bits.join(' · ')) + '</span></div>';
     }
     if (e.probed_at) {
       html += '<div class="egress-row"><span>Probed at</span><span class="mono">' + esc(e.probed_at) + '</span></div>';
@@ -471,21 +484,18 @@ function createTaskEl(t) {
   wrap.className = 'task';
   wrap.dataset.taskId = t.task_id;
 
-  const row = document.createElement('button');
-  row.type = 'button';
+  const row = document.createElement('div');
   row.className = 'task-row';
-  row.setAttribute('aria-expanded', 'false');
   row.innerHTML =
     '<div class="task-row-top">' +
       // Số thứ tự = dòng token trong ô dán (1-based), không phải thứ tự hiển thị —
       // để đối chiếu kết quả về đúng dòng AT nào.
       '<span class="task-idx mono"></span>' +
-      '<span class="task-email mono" title="Click to copy"></span>' +
+      '<button type="button" class="task-email" title="Copy email"></button>' +
       '<span class="task-pct"></span>' +
       '<span class="chip chip-gray"></span>' +
-      // Nút xoá từng task. Phải là <span role=button> chứ không phải <button>:
-      // cả cái row đã là 1 <button>, lồng button trong button là HTML không hợp lệ.
-      '<span class="task-remove" role="button" tabindex="0" title="Remove this task (also deletes the server copy)">✕</span>' +
+      '<button type="button" class="task-remove" aria-label="Remove task" title="Remove this task (also deletes the server copy)">✕</button>' +
+      '<button type="button" class="task-toggle" aria-expanded="false" aria-label="View task details" title="View task details"></button>' +
     '</div>' +
     '<div class="task-row-status muted"></div>' +
     '<div class="task-row-egress mono muted"></div>' +
@@ -495,7 +505,9 @@ function createTaskEl(t) {
 
   const detail = document.createElement('div');
   detail.className = 'task-detail';
+  detail.id = 'task-detail-' + t.task_id;
   detail.hidden = true;
+  row.querySelector('.task-toggle').setAttribute('aria-controls', detail.id);
 
   const successResult = document.createElement('div');
   successResult.className = 'success-result';
@@ -542,8 +554,7 @@ function createTaskEl(t) {
   wrap.appendChild(successResult);
   wrap.appendChild(detail);
 
-  // Bấm vào email = copy, không phải mở/đóng detail: listener của row chạy TRƯỚC
-  // handler copy gắn ở document, nên phải chặn ngay ở đây.
+  // Copy and remove have their own native buttons; only the summary toggles details.
   row.addEventListener('click', (ev) => {
     if (ev.target.closest('.task-email, .detail-email')) return;
     toggleDetail(t);
@@ -557,18 +568,12 @@ function createTaskEl(t) {
       ev.preventDefault();
       removeTask(t);
     });
-    rm.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter' || ev.key === ' ') {
-        ev.preventDefault();
-        ev.stopPropagation();
-        removeTask(t);
-      }
-    });
   }
 
   t.el = {
     wrap,
     row,
+    toggle: row.querySelector('.task-toggle'),
     detail,
     successResult,
     successEmail: successResult.querySelector('.success-email'),
@@ -835,6 +840,22 @@ setInterval(tickExpiry, 1000);
      • bấm đúp         -> mở tab mới
      • nút "Mở ↗"      -> mở tab mới (đường hiển thị rõ ràng)
 */
+/* Email của các acc ĐÃ QUÉT THÀNH CÔNG (khách duyệt mandate), xếp theo dòng token.
+
+   Vì sao chỉ lấy `linkState === 'succeeded'`: tab Success gồm cả link VỪA TẠO nhưng
+   chưa ai quét. Link chưa quét thì chưa dùng được, nên copy hết sẽ lẫn acc chưa xong.
+   Muốn biết chắc thì nhìn `linkZero`/`linkNote` — 'succeeded' là mốc duy nhất nghĩa
+   là tiền/mandate đã thực sự qua.
+*/
+function approvedEmails() {
+  const rows = [];
+  for (const t of tasks.values()) {
+    if (t.linkState === 'succeeded' && t.email) rows.push(t);
+  }
+  rows.sort((a, b) => (a.index == null ? 0 : a.index) - (b.index == null ? 0 : b.index));
+  return rows.map(t => t.email);
+}
+
 async function copyToClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -1028,7 +1049,12 @@ document.addEventListener('dblclick', (ev) => {
 
 function renderRow(t) {
   if (!t.el) return;
+  t.el.wrap.dataset.status = t.status;
   t.el.email.textContent = t.email || '';
+  t.el.email.title = (t.email || 'Account') + ' · Copy email';
+  t.el.email.setAttribute('aria-label', 'Copy email ' + (t.email || ''));
+  t.el.toggle.setAttribute('aria-label', 'Toggle details for ' + (t.email || t.task_id));
+  t.el.remove.setAttribute('aria-label', 'Remove task for ' + (t.email || t.task_id));
   if (t.el.idx && t.index != null) {
     // Số hiển thị do `renumber()` đặt theo tab đang xem; ở đây chỉ ghi nhớ dòng
     // token để tooltip nói rõ task này ứng với dòng AT nào.
@@ -1135,13 +1161,14 @@ function renderDetail(t) {
 
   t.el.detail.innerHTML =
     '<div class="detail-head">' +
-      '<span class="detail-email mono" title="Click to copy">' + esc(t.email || '') + '</span>' +
+      '<button type="button" class="detail-email" title="Copy email">' + esc(t.email || '') + '</button>' +
       '<div class="detail-actions">' +
         '<button type="button" class="btn btn-retry">↻ Retry</button>' +
         '<button type="button" class="btn btn-remove">✕ Remove</button>' +
       '</div>' +
     '</div>' +
     '<div class="detail-section">' +
+      '<div class="detail-section-title">Task execution</div>' +
       '<div class="exec-row">' + chipHtml(t) + '<span class="muted">' + dur + '</span>' +
         '<span class="run-label">Run ' + (t.run || 1) + '</span></div>' +
       errHtml +
@@ -1173,7 +1200,7 @@ function toggleDetail(t) {
     t.el.detail.innerHTML = '';
   }
   t.el.detail.hidden = !t.expanded;
-  t.el.row.setAttribute('aria-expanded', String(t.expanded));
+  t.el.toggle.setAttribute('aria-expanded', String(t.expanded));
 }
 
 /* ------------------------- counters / UI --------------------------- */
@@ -1221,6 +1248,12 @@ function updateCounters() {
 
   // Nút "Dọn dẹp" nói rõ nó sắp xoá tab nào và bao nhiêu task — nút ✕ nhỏ trên tab
   // trước đây khó thấy, user phải đi xoá từng card một.
+  // Nút copy email: đếm theo SỐ ACC ĐÃ QUÉT THÀNH CÔNG (không phải theo tab đang chọn)
+  if (els.btnCopyEmailsLabel) {
+    const nOk = approvedEmails().length;
+    els.btnCopyEmailsLabel.textContent = 'Copy emails' + (nOk ? ' (' + nOk + ')' : '');
+    els.btnCopyEmails.disabled = nOk === 0;
+  }
   if (els.btnClearTabLabel) {
     const label = (QUEUE_FILTERS.find(f => f.key === state.filter) || {}).label || '';
     const n = state.filter === 'all' ? tasks.size : (c[state.filter] || 0);
@@ -1245,9 +1278,7 @@ function updateQueueLoading() {
     // thực sự quét — parse_proxy_lines() bỏ dòng rác và chuẩn hoá host:port:user:pass,
     // đo được 6799 dòng dán vào nhưng server chỉ nhận 100. Ghi "quét 6799 proxy" là
     // nói sai và làm user tưởng phải chờ hàng giờ.
-    els.queueLoadingText.textContent = els.useFilter.checked
-      ? 'Scanning proxy pool… ' + fmtElapsed(secs)
-      : 'Creating job… ' + fmtElapsed(secs);
+    els.queueLoadingText.textContent = 'Creating job… ' + fmtElapsed(secs);
     els.queueLoadingFill.style.width = '100%';   // thanh chạy mờ (indeterminate)
     el.classList.add('indeterminate');
     return;
@@ -1387,6 +1418,7 @@ function setJobBadge(jobId) {
     els.jobIdInput.value = jobId || '';
     els.jobIdInput.classList.remove('bad');
   }
+  updatePushQueue();   // đổi job -> trạng thái nút Push phải theo
 }
 
 // Đổ danh sách job id đã biết vào <datalist> để gõ tới đâu gợi ý tới đó.
@@ -1453,6 +1485,13 @@ function renderJobHistory(jobs) {
   markCurrentJob();
 }
 
+// Hiện/ẩn lý do job bị dừng sớm. Xoá khi bắt đầu job mới để không lẫn thông tin cũ.
+function setStopNote(reason) {
+  if (!els.stopNote) return;
+  els.stopNote.hidden = !reason;
+  els.stopNote.textContent = reason ? '⏹ Stopped early — ' + reason : '';
+}
+
 // Đánh dấu dòng của job đang mở. Gọi lại mỗi lần đổi job (không fetch lại).
 function markCurrentJob() {
   if (!els.historyList) return;
@@ -1517,18 +1556,12 @@ function readWorkers() {
 
 function updateTokenCount() {
   const n = getTokens().length;
-  const w = readWorkers();
-  const warnRam = (w.clamped || w.value > RAM_WARN_WORKERS)
-    ? w.value + ' workers ≈ ' + (w.value * 70 / 1024).toFixed(1) + ' GB RAM for extract_cs subprocesses.'
-      + (w.clamped ? ' Capped at ' + MAX_WORKERS + ' (you asked for ' + w.raw + ').' : '')
-    : '';
   els.tokenCount.textContent = n + ' token' + plural(n) + ' detected';
   els.summaryTasks.textContent = n + ' task' + plural(n) + ' × 1 use each';
   els.summaryTotal.textContent = 'Total uses: ' + n;
-  // Cảnh báo: RAM khi worker vượt ngưỡng (mỗi task là 1 subprocess extract_cs ~70 MB),
-  // còn lại là cảnh báo token như cũ. Một dòng, một nguồn.
-  const warn = warnRam
-    || (n > 0 ? n + ' token' + plural(n) + ' ready. Tasks over quota may fail.' : '');
+  // Chỉ còn cảnh báo token (đã bỏ cảnh báo RAM theo yêu cầu). Khi bị kẹp trần worker
+  // thì toast ở runJob vẫn báo "Capped at N — you asked for M".
+  const warn = n > 0 ? n + ' token' + plural(n) + ' ready. Tasks over quota may fail.' : '';
   els.warning.hidden = !warn;
   els.warning.textContent = warn;
   setSubmitState();
@@ -1558,6 +1591,7 @@ function setSubmitState() {
   // 停止期间给整个队列加个标记：正在跑的卡会显示「đang huỷ…」，
   // 让用户看到「停止确实在做事情」，而不是只看到按钮变灰、任务照旧在跑。
   updateCounters();
+  updatePushQueue();   // trạng thái chạy đổi -> ẩn/hiện nút Push
 }
 
 function updateModeHint() {
@@ -1615,6 +1649,7 @@ function handleEvent(evt) {
     case 'job_stopping': onJobStopping(evt); break;
     case 'error': toast(evt.message || 'Error'); break;
     case 'state': applySnapshot(evt.job || {}); break;
+    case 'proxy_quality': onProxyQuality(evt); break;
     case 'task_start': onTaskStart(evt); break;
     case 'job_progress': updateCounters(); break;
   }
@@ -1706,6 +1741,23 @@ function fmtGeo(g) {
   return [g.city, g.region, g.country].filter(Boolean).join(', ');
 }
 
+function onProxyQuality(evt) {
+  // Chat luong pool proxy cua job: diem/risk/user_type cua con tot nhat, so con bi
+  // loai, va so proxy sinh bu khi pool thieu (xem ippure.py + proxy_pool.py).
+  if (evt.error) { toast('Proxy quality: bỏ qua (' + evt.error + ')'); return; }
+  const b = evt.best || {};
+  const g = evt.generated || {};
+  const parts = [];
+  if (b.grade) parts.push(b.grade + ' ' + (b.score != null ? b.score + ' điểm' : ''));
+  if (b.country) parts.push(b.country);
+  if (b.risk != null) parts.push('risk ' + b.risk);
+  if (b.user_type) parts.push(b.user_type);
+  if (evt.scanned) parts.push('chấm ' + evt.scanned + ' proxy');
+  if (g.verified) parts.push('sinh bù ' + g.verified + ' proxy mới (' + g.sess_minutes + ' phút)');
+  else if (evt.excluded) parts.push('loại ' + evt.excluded);
+  if (parts.length) toast('Pool proxy: ' + parts.join(' · '));
+}
+
 function onLog(evt) {
   // Log cấp JOB (task_id == "*": "== stop requested ==", "proxy gate …") không thuộc
   // task nào. Trước đây ensureTask("*") tạo ra một task MA không có email/token,
@@ -1794,6 +1846,12 @@ function onJobDone(evt) {
   toast(evt.status === 'stopped'
     ? 'Job stopped · ' + (evt.done ?? 0) + '/' + (evt.total ?? 0) + ' tasks processed'
     : 'Job finished: ' + (evt.ok ?? 0) + ' ok · ' + (evt.fail ?? 0) + ' fail');
+  // Lý do dừng: chỉ còn khi NGƯỜI DÙNG bấm Stop (đã bỏ circuit breaker tự dừng
+  // theo yêu cầu) — hiện thường trực để không tưởng job chạy hết bình thường.
+  if (evt.stop_reason) {
+    toast('⏹ Đã dừng — ' + evt.stop_reason);
+    setStopNote(evt.stop_reason);
+  }
   fillJobIdList();   // job vừa xong đã có file kết quả -> cập nhật lại lịch sử
 }
 
@@ -1845,6 +1903,7 @@ function applySnapshot(data) {
   tasks.clear();
   els.taskList.innerHTML = '';
   state.jobId = data.job_id || state.jobId;
+  setStopNote(data.stop_reason || '');   // job cũ mở lại vẫn thấy lý do dừng
   state.total = data.total || 0;
   state.mode = data.mode || 'auto';
   state.running = data.status === 'running';
@@ -1896,6 +1955,7 @@ function applySnapshot(data) {
 
 function attachJob(jobId) {
   state.jobId = jobId;
+  setStopNote('');                 // job mới -> bỏ lý do dừng của job trước
   state.running = true;
   state.stopping = false;
   setJobBadge(jobId);
@@ -1925,7 +1985,7 @@ async function runJob() {
   const workers = w.value;
   if (w.clamped) toast('Workers capped at ' + MAX_WORKERS + ' — you asked for ' + w.raw + '.');
   const retriesInput = parseInt(els.retries.value, 10);
-  const retries = Math.max(0, Math.min(5, Number.isNaN(retriesInput) ? 1 : retriesInput));
+  const retries = Math.max(0, Math.min(5, Number.isNaN(retriesInput) ? 3 : retriesInput));
   const payload = {
     tokens: tokens.join('\n'),
     mode: state.mode,
@@ -1934,7 +1994,6 @@ async function runJob() {
     workers,
     retries,
     proxies: els.useProxy.checked ? getProxies() : null,
-    min_score: els.useFilter.checked ? (parseInt(els.minScore.value, 10) || 0) : 0,
   };
 
   state.tokens = tokens.slice();
@@ -1993,6 +2052,55 @@ async function stopJob() {
   toast('Stopping · running tasks finish first');
 }
 
+/* Đẩy token đang có trong ô "Access tokens" vào queue của JOB HIỆN TẠI.
+
+   Vì sao cần: trước đây muốn chạy thêm acc phải bấm Stop rồi gửi job mới — mất
+   phần đang chạy và phải chấm lại pool proxy từ đầu. Nút này nối thẳng vào job
+   hiện có (POST /api/append), giữ nguyên pool proxy, và bỏ qua acc trùng.
+
+   Khác nút "Run N checkout tasks": nút Run tạo job MỚI, nút này thêm vào job CŨ.
+*/
+async function pushToQueue() {
+  if (!state.jobId) { toast('Chưa có job nào — hãy bấm Run trước'); return; }
+  const tokens = getTokens();
+  if (!tokens.length) { toast('Ô Access tokens đang trống'); return; }
+  if (els.pushQueue) els.pushQueue.disabled = true;
+  try {
+    const res = await fetch('/api/append/' + state.jobId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tokens: tokens.join('\n') }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { toast(data.detail || 'Push thất bại'); return; }
+    const skipped = data.skipped ? (' — bỏ qua ' + data.skipped + ' acc trùng') : '';
+    toast('Đã push ' + data.added + ' acc vào queue' + skipped);
+  } catch (e) {
+    toast('Push thất bại');
+  } finally {
+    updatePushQueue();
+  }
+}
+
+/* Nút Push CHỈ tồn tại khi job đang chạy.
+
+   Vì sao: push có nghĩa là "thêm vào hàng đợi ĐANG chạy". Chưa chạy gì thì việc
+   đúng là bấm Run (tạo job mới) — để nút Push hiện ra lúc đó chỉ gây lẫn.
+   Số trên nút là số token đang có trong ô Access tokens.
+*/
+function updatePushQueue() {
+  if (!els.pushQueue) return;
+  const running = !!state.running;
+  els.pushQueue.hidden = !running;          // không chạy -> không tồn tại
+  if (!running) return;
+  const n = getTokens().length;
+  if (els.pushQueueCount) els.pushQueueCount.textContent = String(n);
+  els.pushQueue.disabled = n === 0;
+  els.pushQueue.title = n === 0
+    ? 'Ô Access tokens đang trống — dán token vào trước'
+    : 'Đẩy ' + n + ' token vào queue của job ' + state.jobId;
+}
+
 async function retryTask(t) {
   if (!state.jobId) return;
   try {
@@ -2040,6 +2148,12 @@ async function removeTask(t) {
 // LUU Y: luu dang plaintext trong localStorage cua browser (token la credential).
 
 const STORE_KEY = 'upi-web-form-v1';
+// Di trú 1 lần cho form đã lưu trong localStorage: mặc định `retries` đổi 1 -> 3.
+// Giá trị 1 đang nằm trong localStorage của người dùng là của MẶC ĐỊNH CŨ (không phải
+// họ cố ý chọn), nên nếu không bỏ qua thì mặc định mới sẽ không bao giờ hiện ra.
+// Tăng số này khi cần lặp lại việc di trú.
+const FORM_VERSION = 2;
+
 
 function saveForm() {
   try {
@@ -2053,8 +2167,7 @@ function saveForm() {
       workers: els.workers.value,
       retries: els.retries.value,
       view: state.view,
-      useFilter: els.useFilter.checked,
-      minScore: els.minScore.value,
+      formVersion: FORM_VERSION,
     }));
   } catch (e) { /* localStorage bi chan / day -> bo qua */ }
 }
@@ -2083,10 +2196,11 @@ function loadForm() {
     els.promo.value = saved.promo;
   }
   if (saved.workers) els.workers.value = saved.workers;
-  if (saved.retries != null) els.retries.value = saved.retries;
+  // Chỉ nhận retries đã lưu khi form là bản hiện tại; bản cũ thì để mặc định mới (3).
+  if (saved.retries != null && saved.formVersion === FORM_VERSION) {
+    els.retries.value = saved.retries;
+  }
   if (saved.view === 'grid' || saved.view === 'list') state.view = saved.view;
-  els.useFilter.checked = !!saved.useFilter;
-  if (saved.minScore != null) els.minScore.value = saved.minScore;
   if (saved.mode) setMode(saved.mode);
 
   updatePoolStatus();
@@ -2096,73 +2210,7 @@ function loadForm() {
 function updatePoolStatus() {
   const n = els.proxies.value.split('\n').map(s => s.trim()).filter(Boolean).length;
   els.poolStatus.hidden = !(els.useProxy.checked && n > 0);
-  els.poolCount.textContent = n + ' proxy trong pool';
-}
-
-/* ---------------------- quét proxy (sạch / risk thấp) ---------------- */
-
-function gradeClass(g) {
-  return 'grade grade-' + String(g || 'f').toLowerCase();
-}
-
-function renderScanResult(data) {
-  const g = data.grades || {};
-  const usable = data.usable || 0;
-  const min = parseInt(els.minScore.value, 10) || 0;
-  const pass = (data.results || []).filter(r => r.ok && r.score >= min).length;
-
-  let html = '<div class="scan-head">' +
-    '<span><b>' + usable + '/' + data.total + '</b> usable proxies (right country)</span>' +
-    '<span class="muted">A ' + (g.A || 0) + ' · B ' + (g.B || 0) + ' · C ' + (g.C || 0) +
-    ' · F ' + (g.F || 0) + '</span></div>';
-
-  html += '<div class="scan-head"><span>Passing <b>' + esc(min) + '</b>: <b>' +
-    pass + '</b> proxy</span></div>';
-
-  html += '<div class="scan-table">';
-  (data.results || []).slice(0, 50).forEach((r, i) => {
-    const flags = (r.flags || []).map(f => '<span class="flag">' + esc(f) + '</span>').join(' ');
-    const ok = r.ok && r.score >= min;
-    html += '<div class="scan-item' + (ok ? '' : ' scan-item-off') + '">' +
-      '<div class="scan-line1">' +
-        '<span class="muted scan-rank">#' + (i + 1) + '</span>' +
-        '<span class="' + gradeClass(r.grade) + '">' + esc(r.score) + ' ' + esc(r.grade) + '</span>' +
-        '<span class="scan-flags">' + (flags || '<span class="muted">clean</span>') + '</span>' +
-      '</div>' +
-      '<div class="scan-line2 mono">' + esc(r.ip || '—') +
-        ' <span class="muted">' + esc(r.country || '') + (r.ip_type ? ' ' + esc(r.ip_type) : '') + '</span>' +
-        (r.latency_ms ? ' <span class="muted">· ' + esc(r.latency_ms) + 'ms</span>' : '') +
-      '</div>' +
-      (r.org ? '<div class="scan-line3 muted" title="' + esc(r.org) + '">' + esc(r.org) + '</div>' : '') +
-      '</div>';
-  });
-  html += '</div>';
-  els.scanResult.innerHTML = html;
-  els.scanResult.hidden = false;
-}
-
-async function scanProxies() {
-  const pool = getProxies();
-  if (!pool) { toast('No proxies to scan'); return; }
-  els.poolScan.disabled = true;
-  els.poolScan.textContent = 'Scanning…';
-  try {
-    const res = await fetch('/api/scan-proxies', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ proxies: pool, country: els.country.value || 'IN', workers: 12 }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'scan failed');
-    renderScanResult(data);
-    const min = parseInt(els.minScore.value, 10) || 0;
-    const pass = (data.results || []).filter(r => r.ok && r.score >= min).length;
-    toast('Scan done: ' + pass + '/' + data.total + ' proxies ≥' + min);
-  } catch (e) {
-    toast('Scan failed: ' + (e.message || e));
-  } finally {
-    els.poolScan.disabled = false;
-    els.poolScan.textContent = 'Scan pool';
-  }
+  els.poolCount.textContent = n + ' proxies in pool';
 }
 
 /* ----------------------------- init -------------------------------- */
@@ -2170,6 +2218,7 @@ async function scanProxies() {
 function bindEvents() {
   els.tokens.addEventListener('input', () => {
     updateTokenCount();
+    updatePushQueue();
     saveForm();
   });
   els.useProxy.addEventListener('change', () => {
@@ -2187,9 +2236,6 @@ function bindEvents() {
     saveForm();
     toast('Proxy pool cleared');
   });
-  els.poolScan.addEventListener('click', scanProxies);
-  els.useFilter.addEventListener('change', saveForm);
-  els.minScore.addEventListener('input', saveForm);
   els.country.addEventListener('input', saveForm);
   els.promo.addEventListener('change', saveForm);
   els.workers.addEventListener('input', () => { saveForm(); updateTokenCount(); });
@@ -2204,17 +2250,6 @@ function bindEvents() {
     b.addEventListener('click', () => setFilter(b.dataset.filter));
   });
 
-  // 每个 tab 上的 ✕：清掉该 tab 的 task（同时删服务端已存的，不然刷新又回来）
-  document.querySelectorAll('.tab-clear').forEach(span => {
-    span.addEventListener('click', (ev) => {
-      ev.stopPropagation();          // 别顺手把 tab 也切了
-      ev.preventDefault();
-      clearTab(span.dataset.clear, span);
-    });
-    span.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); span.click(); }
-    });
-  });
   els.btnSuccess.addEventListener('click', () => {
     setFilter(state.filter === 'success' ? 'all' : 'success');
   });
@@ -2223,6 +2258,13 @@ function bindEvents() {
       loadState(state.jobId);
       toast('Refreshed');
     }
+  });
+  els.pushQueue.addEventListener('click', pushToQueue);
+  els.btnCopyEmails.addEventListener('click', async () => {
+    const list = approvedEmails();
+    if (!list.length) { toast('Chưa có acc nào quét thành công'); return; }
+    const ok = await copyToClipboard(list.join('\n'));
+    toast(ok ? ('Đã copy ' + list.length + ' email (mỗi dòng 1 acc)') : 'Copy lỗi — thử lại');
   });
   els.btnClearTab.addEventListener('click', () => clearTab(state.filter, els.btnClearTab));
   els.btnNotify.addEventListener('click', toggleNotify);

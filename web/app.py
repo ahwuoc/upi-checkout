@@ -65,17 +65,12 @@ class RunRequest(BaseModel):
     country: str = "IN"
     promo: str = "off"
     workers: int = 4
-    retries: int = Field(default=1, ge=0, le=5)
+    retries: int = Field(default=3, ge=0, le=5)
     proxies: str | None = None
-    min_score: int = Field(default=0, ge=0, le=100,
-                           description=">0: workers score proxies on demand and only "
-                                       "use ones at/above this score")
 
 
-class ScanRequest(BaseModel):
-    proxies: str | None = None
-    country: str = "IN"
-    workers: int = Field(default=12, ge=1, le=64)
+class AppendRequest(BaseModel):
+    tokens: str = Field(default="", description="one access token per line")
 
 
 class ClearRequest(BaseModel):
@@ -128,37 +123,14 @@ def api_run(req: RunRequest) -> dict:
         raise HTTPException(400, "No access tokens provided.")
     if req.mode not in MODES:
         raise HTTPException(400, f"invalid mode: {req.mode}")
-    if req.workers < 1 or req.workers > 64:
-        raise HTTPException(400, "workers must be within 1..64")
+    if req.workers < 1 or req.workers > 200:
+        raise HTTPException(400, "workers must be within 1..200")
     try:
         job = engine.start_job(tokens, req.mode, req.country, req.promo,
-                               req.workers, req.proxies, req.min_score, req.retries)
+                               req.workers, req.proxies, req.retries)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return {"job_id": job.job_id, "total": job.total}
-
-
-@app.post("/api/scan-proxies")
-async def api_scan_proxies(req: ScanRequest) -> dict:
-    """Quét + chấm điểm cả pool trước khi chạy: proxy sạch / risk thấp xếp trước."""
-    if req.proxies and req.proxies.strip():
-        px = engine.parse_proxy_lines(req.proxies)
-    else:
-        px = engine.cli.load_proxies(engine.DEFAULT_PROXY_FILE)
-    if not px:
-        raise HTTPException(400, "Pool is empty.")
-
-    results = await asyncio.to_thread(
-        engine.cli.scan_proxies, px, req.country, req.workers, 15)
-    grades: dict[str, int] = {}
-    for r in results:
-        grades[r["grade"]] = grades.get(r["grade"], 0) + 1
-    return {
-        "total": len(results),
-        "grades": grades,
-        "usable": sum(1 for r in results if r["ok"] and "wrong-country" not in r["flags"]),
-        "results": results,
-    }
 
 
 @app.get("/api/jobs")
@@ -209,6 +181,21 @@ def api_retry(job_id: str, task_id: str) -> dict:
     if not engine.retry_task(job_id, task_id):
         raise HTTPException(400, "this task cannot be retried")
     return {"ok": True}
+
+
+@app.post("/api/append/{job_id}")
+def api_append(job_id: str, req: AppendRequest) -> dict:
+    """Thêm AT (token) vào queue của job đang chạy — không cần bấm Stop.
+
+    Dùng pool proxy sẵn có của job, nên không phải chấm lại chất lượng proxy.
+    """
+    tokens = [ln.strip() for ln in (req.tokens or "").splitlines() if ln.strip()]
+    if not tokens:
+        raise HTTPException(400, "no tokens")
+    result = engine.append_tasks(job_id, tokens)
+    if not result.get("ok"):
+        raise HTTPException(400, result.get("error") or "append failed")
+    return result
 
 
 @app.post("/api/stop/{job_id}")

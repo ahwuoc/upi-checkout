@@ -16,23 +16,38 @@ Mở `http://127.0.0.1:8099`, dán token (mỗi dòng 1 JWT), chọn luồng, b�
 ```
 web/
 ├── app.py               FastAPI: HTTP + SSE
-├── engine.py            job runner — gọi cli.py qua progress hook, phát event
+├── engine.py            queue/SSE orchestration, phát event
 └── static/
     ├── index.html       layout 2 cột (sidebar + danh sách task)
     ├── app.js           EventSource, cập nhật DOM tại chỗ theo task_id
     └── style.css        dark theme
 ```
 
-`engine.py` **không chứa logic protocol** — nó gọi thẳng `cli.detect_one` /
-`cli.oaics_one` / `cli.cs_subprocess_one` với hook `step` / `on_log` / `on_geo`.
-Muốn sửa protocol thì sửa `../cli.py`, UI tự ăn theo.
+Root backend modules: `backend.py` (shared seam), `cs_backend.py` (in-process CS adapter), `extract_cs.py` (CS protocol), and `cli.py` (OAICS/detection + CLI compatibility).
+
+`engine.py` **không chứa logic protocol** — nó gọi `../backend.py` qua một
+request và hooks nhỏ (`step`, `on_log`, `on_geo`, `should_stop`).
+
+Backend CS có 2 chế độ, chọn bằng `UPI_WEB_CS_MODE`:
+
+| giá trị | việc | song song |
+|---|---|---|
+| `subprocess` (**mặc định**) | mỗi task một tiến trình `extract_cs.py` (`cli.cs_subprocess_one`), state riêng, ~70–100MB RAM/task | **thật**, đúng bằng số worker |
+| `inprocess` | chạy trong chính process web qua `cs_backend.run_in_process` | ❌ bị `cs_backend._RUN_LOCK` khoá suốt flow CS (vì `extract_cs` có state toàn cục) → mỗi lúc chỉ 1 task CS |
+
+Vì sao mặc định là `subprocess`: đo thật job 100 task / 20 worker ở chế độ
+`inprocess` — 20 task hiện "đang chạy" nhưng 13 con đứng im ở bước `runner` suốt 7
+phút (không có log nào), chỉ 5 task xong ⇒ ~1 task/100s ⇒ 100 task mất ~5,5 giờ
+thay vì ~17 phút. Cùng phép đo ở `subprocess`: 4 task xong trong 4,5s (chạy chồng
+nhau) so với 10,9s (nối đuôi 4,6 → 6,2 → 8,7 → 10,9s). Chỉ dùng `inprocess` khi
+cần tiết kiệm RAM hoặc để đối chiếu khi debug.
 
 ## Luồng backend hiển thị
 
 | `flow` | Nhãn UI | Step |
 |---|---|---|
 | `oaics` | **LUỒNG OAICS** | Warmup → Create checkout → Apply promotion → Proxy egress → Update tax region → Create payment method → Confirm checkout → Confirm intent → Extract QR artifact |
-| `cs` | **LUỒNG CS** | 10 bước: Start cs_runner → Create checkout → Apply promotion → Initialize payment page → Update tax region → Create payment method → Confirm payment → Approve payment → Poll payment artifact → Extract payment artifact |
+| `cs` | **LUỒNG CS** | 10 bước: Initialize CS flow → Create checkout → Apply promotion → Initialize payment page → Update tax region → Create payment method → Confirm payment → Approve payment → Poll payment artifact → Extract payment artifact |
 | `null` | ĐANG DÒ FLOW / — | Warmup → Detect provider |
 
 Chế độ `auto` chạy bước **Detect provider** trước; khi biết kết quả, server gửi
@@ -66,7 +81,7 @@ Chỉ `LINK` và `APPROVE_OK_NO_LINK` được coi là có link.
 ## Ghi chú
 
 - Job lưu **trong RAM**, giữ 20 job gần nhất; restart server là mất.
-- Log subprocess của luồng `cs` được stream live, lưu tối đa 200 dòng/task.
+- Log của luồng `cs` được stream live, lưu tối đa 200 dòng/task.
 - Client chậm: queue SSE giới hạn 5000 event, event cũ nhất bị bỏ — UI tự đồng bộ
   lại bằng `/api/state`.
 - Thao tác `oaics`/`cs`/`auto` tạo **PaymentIntent thật** (không tự thanh toán UPI).

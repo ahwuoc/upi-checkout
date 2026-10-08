@@ -53,9 +53,10 @@ import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Event, RLock, local
-from typing import Any
+from typing import Any, Callable, Mapping
 from urllib.parse import parse_qsl, quote, urlencode, unquote, urljoin, urlparse, urlsplit, urlunsplit
 
 import requests
@@ -78,6 +79,79 @@ DEFAULT_TIMEOUT = 30
 CHATGPT_TIMEOUT = 45
 UPI_UNAVAILABLE_ERROR = "The current account's payment method does not support UPI"
 
+# The standalone CLI reads the environment. The web backend supplies immutable
+# per-call overrides so concurrent accounts never share token/config changes.
+_run_context = local()
+
+
+def env_value(name: str, default: Any = None) -> Any:
+    context = getattr(_run_context, "value", None)
+    if context is not None and name in context["settings"]:
+        return context["settings"][name]
+    return os.environ.get(name, default)
+
+
+class FlowCancelled(BaseException):
+    """Cancellation must escape protocol retry handlers catching Exception."""
+
+
+class FlowTimedOut(BaseException):
+    """Task deadline elapsed; do not retry the interrupted HTTP operation."""
+
+
+def check_cancelled() -> None:
+    context = getattr(_run_context, "value", None)
+    if context is None:
+        return
+    if context["should_stop"] is not None and context["should_stop"]():
+        raise FlowCancelled("job stopped")
+    if context["deadline"] is not None and time.monotonic() >= context["deadline"]:
+        raise FlowTimedOut("task deadline exceeded")
+
+
+@contextmanager
+def execution_context(settings: Mapping[str, str], *,
+                      on_output: Callable[[str], None] | None = None,
+                      on_result: Callable[[dict[str, Any]], None] | None = None,
+                      should_stop: Callable[[], bool] | None = None,
+                      timeout: float | None = 240.0):
+    """Isolate one embedded execution without changing os.environ/stdout."""
+    previous = getattr(_run_context, "value", None)
+    context = {
+        "settings": dict(settings), "on_output": on_output,
+        "on_result": on_result, "should_stop": should_stop,
+        "deadline": time.monotonic() + timeout if timeout and timeout > 0 else None,
+        "proxy_state": None, "redaction_values": set(), "sessions": [],
+    }
+    _run_context.value = context
+    try:
+        check_cancelled()
+        yield
+    finally:
+        for session in context["sessions"]:
+            try:
+                session.close()
+            except Exception:
+                pass
+        _run_context.value = previous
+
+
+def emit_result(**values: Any) -> None:
+    context = getattr(_run_context, "value", None)
+    callback = context["on_result"] if context is not None else None
+    if callback is not None:
+        callback(values)
+
+
+def emit_output(text: str = "", *, flush: bool = False) -> None:
+    context = getattr(_run_context, "value", None)
+    callback = context["on_output"] if context is not None else None
+    if callback is None:
+        print(text, flush=flush)
+        return
+    for line in str(text).split("\n"):
+        callback(_redact_text(line))
+
 
 def stripe_heavy_timeout() -> int:
     """Timeout cho các request Stripe lớn (confirm/poll/intent-get) — cho phép
@@ -90,7 +164,7 @@ def stripe_heavy_timeout() -> int:
 def full_dump_stages() -> set[str]:
     """Các stage dump cần giữ nguyên response ĐẦY ĐỦ (không cắt UPI_DUMP_LIMIT).
     Mặc định là 'all' để lưu trọn vẹn toàn bộ response HTTP."""
-    raw = os.environ.get("UPI_DUMP_FULL_STAGES", "all").strip()
+    raw = str(env_value("UPI_DUMP_FULL_STAGES", "all") or "").strip()
     if raw.lower() == "all":
         return {"all"}
     stages: set[str] = set()
@@ -107,7 +181,7 @@ STRIPE_VERSION_FULL = (
 DEFAULT_STRIPE_RUNTIME_VERSION = "6f8494a281"
 CHATGPT_CLIENT_VERSION = "prod-db390ebea64862bf1899c420a4c736e0cf639747"
 CHATGPT_CLIENT_BUILD_NUMBER = "7904904"
-DEFAULT_STRIPE_PK = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
+DEFAULT_STRIPE_PK = str(env_value("STRIPE_PUBLISHABLE_KEY", "") or "")
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
@@ -131,14 +205,14 @@ CHROME_CLIENT_HINTS = {
     "sec-ch-ua-bitness": '"64"',
 }
 def configured_country(name: str, default: str) -> str:
-    value = str(os.environ.get(name, default) or default).strip().upper()
+    value = str(env_value(name, default) or default).strip().upper()
     if not re.fullmatch(r"[A-Z]{2}", value):
         raise RuntimeError(f"{name} must be a two-letter country code")
     return value
 
 
 def configured_countries(name: str, default: str) -> list[str]:
-    value = str(os.environ.get(name, default) or default)
+    value = str(env_value(name, default) or default)
     countries = [part.strip().upper() for part in value.split(",")]
     if not countries or any(not re.fullmatch(r"[A-Z]{2}", country) for country in countries):
         raise RuntimeError(f"{name} must be a comma-separated list of two-letter country codes")
@@ -146,12 +220,12 @@ def configured_countries(name: str, default: str) -> list[str]:
 
 
 UPI_BOOTSTRAP_COUNTRY = configured_country(
-    "UPI_BOOTSTRAP_COUNTRY", os.environ.get("UPI_CHECKOUT_COUNTRY", "IN")
+    "UPI_BOOTSTRAP_COUNTRY", env_value("UPI_CHECKOUT_COUNTRY", "IN")
 )
 UPI_PROMOTION_COUNTRIES = configured_countries("UPI_PROMOTION_COUNTRY", "IN")
 UPI_PROMOTION_COUNTRY = UPI_PROMOTION_COUNTRIES[0]
 UPI_PROVIDER_COUNTRY = configured_country(
-    "UPI_PROVIDER_COUNTRY", os.environ.get("UPI_BILLING_COUNTRY", "IN")
+    "UPI_PROVIDER_COUNTRY", env_value("UPI_BILLING_COUNTRY", "IN")
 )
 
 COUNTRY_CURRENCY = {
@@ -218,7 +292,7 @@ EMAIL_DOMAINS = ("gmail.com", "outlook.com", "icloud.com", "hotmail.com")
 # Ở đây làm giống `cli.geo_profile()` (đang dùng cho luồng oaics): hỏi ipwho.is
 # QUA CHÍNH PROXY đang dùng, rồi reverse-geocode toạ độ bằng Nominatim -> city /
 # state / postal / đường đều khớp nhau VÀ khớp IP mà Stripe nhìn thấy.
-GEO_BILLING_TIMEOUT = float(os.environ.get("UPI_GEO_BILLING_TIMEOUT", "10") or 10)
+GEO_BILLING_TIMEOUT = float(env_value("UPI_GEO_BILLING_TIMEOUT", "10") or 10)
 
 # Mã bang theo ISO 3166-2:IN. Đây là dạng mà luồng này ĐÃ chạy thành công: 3 ca uỷ
 # nhiệm ₹0 ở job e0a538cbabcb điền TN/TN/DL, và CITIES_IN cũ cũng dùng mã 2 ký tự.
@@ -422,7 +496,9 @@ _log_context = local()
 def redact_log_text(text: str) -> str:
     text = str(text or "")
     with _proxy_redaction_lock:
-        values = sorted(_proxy_redaction_values, key=len, reverse=True)
+        context = getattr(_run_context, "value", None)
+        source = context["redaction_values"] if context is not None else _proxy_redaction_values
+        values = sorted(source, key=len, reverse=True)
     for value in values:
         if value:
             try:
@@ -439,21 +515,26 @@ def log(message: str, prefix: str = "") -> None:
     context = getattr(_log_context, "prefix", "")
     line = redact_log_text(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {prefix}{context}{message}")
     with _log_lock:
-        print(line, flush=True)
+        run_context = getattr(_run_context, "value", None)
+        output = run_context["on_output"] if run_context is not None else None
+        if output is None:
+            print(line, flush=True)
+        else:
+            output(line)
         with open(_log_file, "a", encoding="utf-8") as f:
             f.write(line + "\n")
             f.flush()
 
 
 def env_bool(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
+    raw = env_value(name)
     if raw is None:
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def env_int(name: str, default: int, minimum: int = 1) -> int:
-    raw = os.environ.get(name, "").strip()
+    raw = str(env_value(name, "") or "").strip()
     if not raw:
         return max(minimum, default)
     try:
@@ -480,7 +561,7 @@ def random_user_agent() -> str:
 
 
 def random_runtime_version() -> str:
-    return os.environ.get("PP_RUNTIME_VERSION", "").strip() or DEFAULT_STRIPE_RUNTIME_VERSION
+    return str(env_value("PP_RUNTIME_VERSION", "") or "").strip() or DEFAULT_STRIPE_RUNTIME_VERSION
 
 
 def stripe_browser_id() -> str:
@@ -509,19 +590,19 @@ def currency_for_country(country: str) -> str:
 
 
 def payment_browser_locale() -> str:
-    return os.environ.get("UPI_BROWSER_LOCALE", "en-IN").strip() or "en-IN"
+    return str(env_value("UPI_BROWSER_LOCALE", "en-IN") or "").strip() or "en-IN"
 
 
 def payment_elements_locale() -> str:
-    return os.environ.get("UPI_ELEMENTS_LOCALE", "en").strip() or "en"
+    return str(env_value("UPI_ELEMENTS_LOCALE", "en") or "").strip() or "en"
 
 
 def payment_browser_timezone() -> str:
-    return os.environ.get("UPI_BROWSER_TIMEZONE", "Asia/Kolkata").strip() or "Asia/Kolkata"
+    return str(env_value("UPI_BROWSER_TIMEZONE", "Asia/Kolkata") or "").strip() or "Asia/Kolkata"
 
 
 def saved_payment_value() -> str:
-    return os.environ.get("UPI_SAVED_PAYMENT_VALUE", "never").strip() or "never"
+    return str(env_value("UPI_SAVED_PAYMENT_VALUE", "never") or "").strip() or "never"
 
 
 def payment_accept_language() -> str:
@@ -576,11 +657,13 @@ def register_proxy_for_redaction(proxy: str) -> None:
                 port = None
             values.add(f"{host}:{port}" if port else host)
     with _proxy_redaction_lock:
-        _proxy_redaction_values.update(values)
+        context = getattr(_run_context, "value", None)
+        target = context["redaction_values"] if context is not None else _proxy_redaction_values
+        target.update(values)
 
 
 def default_proxy_scheme() -> str:
-    raw = os.environ.get("UPI_PROXY_DEFAULT_SCHEME", "http").strip().lower()
+    raw = str(env_value("UPI_PROXY_DEFAULT_SCHEME", "http") or "").strip().lower()
     raw = raw[:-3] if raw.endswith("://") else raw
     if raw in ("socks5", "socks5h"):
         return "socks5h"
@@ -699,21 +782,20 @@ def normalize_pre_proxy_url(proxy: str) -> str:
 
 
 def proxy_state_path() -> Path:
-    raw = os.environ.get("UPI_PROXY_STATE_FILE", "").strip()
+    raw = str(env_value("UPI_PROXY_STATE_FILE", "") or "").strip()
     return Path(raw) if raw else SCRIPT_DIR / "proxy_state.json"
 
 
 def load_proxy_state() -> dict[str, Any]:
     global _proxy_state
     with _proxy_state_lock:
-        if _proxy_state is not None:
-            return _proxy_state
+        context = getattr(_run_context, "value", None)
+        cached = context["proxy_state"] if context is not None else _proxy_state
+        if cached is not None:
+            return cached
         path = proxy_state_path()
-        if not path.exists():
-            _proxy_state = {"seed": {}, "checkout": {}, "promotion": {}, "provider": {}, "pair": {}}
-            return _proxy_state
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
         except Exception:
             data = {}
         if not isinstance(data, dict):
@@ -723,16 +805,21 @@ def load_proxy_state() -> dict[str, Any]:
         data.setdefault("promotion", {})
         data.setdefault("provider", {})
         data.setdefault("pair", {})
-        _proxy_state = data
-        return _proxy_state
+        if context is not None:
+            context["proxy_state"] = data
+        else:
+            _proxy_state = data
+        return data
 
 
 def save_proxy_state() -> None:
     with _proxy_state_lock:
-        if _proxy_state is None:
+        context = getattr(_run_context, "value", None)
+        state = context["proxy_state"] if context is not None else _proxy_state
+        if state is None:
             return
         path = proxy_state_path()
-        path.write_text(json.dumps(_proxy_state, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def proxy_state_key(group: str, proxy: str) -> str:
@@ -1076,8 +1163,8 @@ def set_proxy(session: Any, proxy: str) -> None:
 def pre_proxy_url() -> str:
     """Local front proxy: local proxy -> file proxy -> target site."""
     for name in ("UPI_PRE_PROXY", "PP_PRE_PROXY", "PP_LOCAL_PROXY"):
-        if name in os.environ:
-            raw = os.environ.get(name, "").strip()
+        if env_value(name, None) is not None:
+            raw = str(env_value(name, "") or "").strip()
             if raw.lower() in {"", "0", "off", "none", "direct", "disabled"}:
                 return ""
             proxy = normalize_pre_proxy_url(raw)
@@ -1103,8 +1190,8 @@ def load_proxy_file(path: Path) -> list[str]:
 
 def proxy_seed_file() -> Path:
     raw = (
-        os.environ.get("UPI_PROXY_SEED_FILE", "").strip()
-        or os.environ.get("PP_PROXY_SEED_FILE", "").strip()
+        str(env_value("UPI_PROXY_SEED_FILE", "") or "").strip()
+        or str(env_value("PP_PROXY_SEED_FILE", "") or "").strip()
     )
     return Path(raw).expanduser() if raw else SCRIPT_DIR / "proxy_seeds.txt"
 
@@ -1242,7 +1329,7 @@ def new_session(proxy: str = "", use_pre_proxy: bool = True) -> Any:
     register_proxy_for_redaction(pre_proxy)
     if CurlCffiSession is not None:
         kwargs: dict[str, Any] = {
-            "impersonate": os.environ.get("CURL_IMPERSONATE", "").strip() or "chrome146"
+            "impersonate": str(env_value("CURL_IMPERSONATE", "") or "").strip() or "chrome146"
         }
         if pre_proxy:
             if CurlOpt is None:
@@ -1403,11 +1490,11 @@ def normalize_token(raw: str) -> tuple[str, str]:
 
 def load_token() -> tuple[str, str]:
     for env_name in ("PP_TOKEN", "UPI_TOKEN"):
-        value = os.environ.get(env_name, "").strip()
+        value = str(env_value(env_name, "") or "").strip()
         if value:
             log(f"using env var {env_name}")
             token, session_token = normalize_token(value)
-            env_session = os.environ.get("PP_SESSION_TOKEN", "").strip()
+            env_session = str(env_value("PP_SESSION_TOKEN", "") or "").strip()
             if env_session or session_token:
                 log("loaded sessionToken cookie")
             return token, env_session or session_token
@@ -1428,13 +1515,13 @@ def load_token() -> tuple[str, str]:
         if text:
             log("using token file")
             token, session_token = normalize_token(text)
-            env_session = os.environ.get("PP_SESSION_TOKEN", "").strip()
+            env_session = str(env_value("PP_SESSION_TOKEN", "") or "").strip()
             if env_session or session_token:
                 log("loaded sessionToken cookie")
             return token, env_session or session_token
 
     token = input("enter access_token: ").strip()
-    session_token = os.environ.get("PP_SESSION_TOKEN", "").strip()
+    session_token = str(env_value("PP_SESSION_TOKEN", "") or "").strip()
     token, parsed_session = normalize_token(token)
     return token, session_token or parsed_session
 
@@ -1475,7 +1562,20 @@ def build_chatgpt_session(access_token: str, device_id: str, proxy: str, session
     try:
         import check_upi_eligibility as cu
         cu.warmup_csrf(session, 15)
-        sh = cu.sentinel_headers(device_id, proxy, 20)
+        # Chia sẻ cookie mà warmup đã thu được (cf_clearance/__cf_bm/...) cho request
+        # /sentinel/req, để nó cũng mang bộ cookie như frame thật. oai-did luôn được
+        # giữ; nếu lấy jar lỗi thì để cu tự dùng oai-did.
+        try:
+            jar = session.cookies.get_dict() or {}
+        except Exception:  # noqa: BLE001
+            jar = {}
+        cookie_parts = [f"{k}={v}" for k, v in jar.items() if v]
+        if session_token:
+            cookie_parts.append(f"__Secure-next-auth.session-token={session_token}")
+        if not any(p.startswith("oai-did=") for p in cookie_parts):
+            cookie_parts.append(f"oai-did={device_id}")
+        cookies_str = "; ".join(cookie_parts) or None
+        sh = cu.sentinel_headers(device_id, proxy, 45, cookies=cookies_str)
         if sh:
             session.headers.update(sh)
     except Exception as exc:
@@ -1515,10 +1615,10 @@ def checkout_response_has_trial(payload: Any) -> bool:
 
 def create_checkout(chatgpt: requests.Session, country: str) -> dict[str, str]:
     country = normalize_country(country)
-    promo_mode = os.environ.get("PP_PROMO_MODE", "campaign").strip().lower() or "campaign"
-    promo_id = os.environ.get("PP_PROMO_ID", "plus-1-month-free").strip()
+    promo_mode = str(env_value("PP_PROMO_MODE", "campaign") or "").strip().lower() or "campaign"
+    promo_id = str(env_value("PP_PROMO_ID", "plus-1-month-free") or "").strip()
     body: dict[str, Any] = {
-        "entry_point": os.environ.get("PP_ENTRY_POINT", "all_plans_pricing_modal"),
+        "entry_point": str(env_value("PP_ENTRY_POINT", "all_plans_pricing_modal") or ""),
         "plan_name": "chatgptplusplan",
         "billing_details": {"country": country, "currency": currency_for_country(country)},
         "checkout_ui_mode": "custom",
@@ -1630,8 +1730,8 @@ def update_checkout_promotion(
     checkout: dict[str, str],
     promotion_country: str,
 ) -> None:
-    mode = os.environ.get("PP_PROMO_MODE", "campaign").strip().lower() or "campaign"
-    promo_id = os.environ.get("PP_PROMO_ID", "plus-1-month-free").strip() or "plus-1-month-free"
+    mode = str(env_value("PP_PROMO_MODE", "campaign") or "").strip().lower() or "campaign"
+    promo_id = str(env_value("PP_PROMO_ID", "plus-1-month-free") or "").strip() or "plus-1-month-free"
     body: dict[str, Any] = {
         "checkout_session_id": checkout["cs_id"],
         "processor_entity": processor_entity_for_country(
@@ -1854,7 +1954,7 @@ def upi_billing_profile(proxy: str = "") -> dict[str, str]:
         "phone": "UPI_PHONE",
     }
     for key, env_name in env_map.items():
-        value = os.environ.get(env_name, "").strip()
+        value = str(env_value(env_name, "") or "").strip()
         if value:
             profile[key] = value
     profile["country"] = normalize_country(profile.get("country", "IN"))
@@ -2164,7 +2264,7 @@ def stripe_confirm_upi(
     runtime_version = str(ctx.get("runtime_version") or DEFAULT_STRIPE_RUNTIME_VERSION)
     body = {
         "eid": "NA",
-        "expected_amount": os.environ.get("PP_EXPECTED_AMOUNT", "").strip() or str(ctx.get("checkout_amount") or amount_from_payload(init_payload)),
+        "expected_amount": str(env_value("PP_EXPECTED_AMOUNT", "") or "").strip() or str(ctx.get("checkout_amount") or amount_from_payload(init_payload)),
         "expected_payment_method_type": "upi",
         "return_url": stripe_confirm_return_url(cs_id, checkout, stripe_hosted_url),
         "_stripe_version": str(ctx.get("stripe_version") or STRIPE_VERSION_FULL),
@@ -3094,7 +3194,7 @@ def run_provider_flow(
     billing: dict[str, str],
     stop_event: Event | None = None,
 ) -> tuple[str, list[str]]:
-    checkout_country = normalize_country(os.environ.get("UPI_CHECKOUT_COUNTRY", UPI_BOOTSTRAP_COUNTRY))
+    checkout_country = normalize_country(env_value("UPI_CHECKOUT_COUNTRY", UPI_BOOTSTRAP_COUNTRY))
     stripe_pk = checkout.get("stripe_pk") or DEFAULT_STRIPE_PK
 
     def inspect_init(payload: dict[str, Any], stage: str) -> tuple[dict[str, Any], int]:
@@ -3123,14 +3223,23 @@ def run_provider_flow(
         if processor_entity:
             checkout["processor_entity"] = processor_entity
             log(f"inferred processor_entity={processor_entity} from Stripe init")
-    inspect_init(init_payload, f"{UPI_BOOTSTRAP_COUNTRY} Bootstrap")
+    ctx, amount = inspect_init(init_payload, f"{UPI_BOOTSTRAP_COUNTRY} Bootstrap")
+    # Bootstrap init cũng trả stripe_hosted_url -> giữ luôn, để nhánh bỏ qua vòng
+    # promotion vẫn có hosted_url (code cũ chỉ gán nó bên trong vòng lặp).
+    hosted_url = str(init_payload.get("stripe_hosted_url") or "")
     if stop_event and stop_event.is_set():
         raise RuntimeError("task stopped; skipping this round")
 
-    hosted_url = ""
-    ctx: dict[str, Any] = {}
-    amount = 0
-    for promotion_index, promotion_country in enumerate(UPI_PROMOTION_COUNTRIES, start=1):
+    # create_checkout đã gắn promo_campaign và Stripe báo 0₫ NGAY từ bootstrap:
+    # không cần gọi /checkout/update (Apply promotion) nữa — bỏ hẳn 1 request
+    # checkout/update + 1 lần stripe_init cho mỗi task. Ít request tới payment API
+    # = ít bề mặt cho risk engine. (Flow của tool khác hiện "Apply promotion
+    # (Skipped)" đúng ở trường hợp này.)
+    if amount == 0:
+        log("checkout already 0 after create_checkout; skipping Apply promotion (checkout/update)")
+        record_checkout_zero_result(checkout_proxy, checkout_country, amount)
+    for promotion_index, promotion_country in enumerate(
+            UPI_PROMOTION_COUNTRIES if amount != 0 else (), start=1):
         current_promotion_proxy = proxy_for_country(promotion_proxy, promotion_country)
         stage_label = f"{promotion_country} checkout/update {promotion_index}/{len(UPI_PROMOTION_COUNTRIES)}"
         log(f"{stage_label}: proxy={proxy_label(current_promotion_proxy)}")
@@ -3182,8 +3291,15 @@ def run_provider_flow(
                 "[WARN] ",
             )
             continue
-        if env_bool("UPI_REQUIRE_ZERO", True):
-            raise RuntimeError(f"0-value discount did not take effect; current minor amount={amount}; stopped generating non-0 UPI link")
+        # (#2) account không được hưởng promo 0₫: sau create_checkout + MỌI checkout/update
+        # mà amount vẫn != 0 -> chạy tiếp chuỗi ₹1,999 chỉ để bị _verify_link đánh fail
+        # sau ~2 phút. Cắt ngay tại đây, báo rõ để engine không retry.
+        promo_mode = str(env_value("PP_PROMO_MODE", "campaign") or "").strip().lower() or "campaign"
+        if promo_mode not in ("off", ""):
+            raise RuntimeError(
+                f"promo_not_eligible: 0-value promo did not apply "
+                f"(minor amount={amount}); account not eligible, skipping ₹1,999 chain"
+            )
 
     stripe = new_session(provider_proxy)
     stripe.headers.update({
@@ -3302,6 +3418,31 @@ def run_provider_flow(
     return redirect_url, list(dict.fromkeys(qr_urls))
 
 
+def new_device_id(access_token: str = "") -> str:
+    """Sinh device_id và LOG LUÔN fingerprint tương ứng.
+
+    Vì sao cần log: `sentinel_fingerprint()` chọn profile (screen/cores/memory) bằng
+    hash của device_id, mà device_id là UUID ngẫu nhiên mỗi lần chạy. Trước đây không
+    có chỗ nào ghi lại, nên dù lấy được link cũng KHÔNG biết ca thắng dùng fingerprint
+    nào -> mọi kết luận về fingerprint chỉ là phỏng đoán.
+
+    `acct` là băm 8 ký tự của token: đủ để nối log với acc trong file (băm lại offline
+    là ra), nhưng KHÔNG ghi token ra log.
+    """
+    device_id = str(uuid.uuid4())
+    try:
+        acct = hashlib.sha256(str(access_token or "").encode()).hexdigest()[:8] if access_token else "-"
+        import check_upi_eligibility as _cue  # noqa: PLC0415
+        fp = _cue.sentinel_fingerprint(device_id)
+        log("fingerprint: acct=%s device=%s screen=%sx%s cores=%s mem=%s locale=%s tz=%s"
+            % (acct, device_id[:8], fp.get("screen_width"), fp.get("screen_height"),
+               fp.get("hardware_concurrency"), fp.get("device_memory"),
+               fp.get("language"), fp.get("timezone")))
+    except Exception:  # noqa: BLE001 — log lỗi không được làm chết flow
+        pass
+    return device_id
+
+
 def run_once(
     access_token: str,
     session_token: str,
@@ -3315,8 +3456,8 @@ def run_once(
 ) -> tuple[str, list[str]]:
     if stop_event and stop_event.is_set():
         raise RuntimeError("task stopped; skipping this round")
-    device_id = str(uuid.uuid4())
-    checkout_country = normalize_country(os.environ.get("UPI_CHECKOUT_COUNTRY", UPI_BOOTSTRAP_COUNTRY))
+    device_id = new_device_id(access_token)
+    checkout_country = normalize_country(env_value("UPI_CHECKOUT_COUNTRY", UPI_BOOTSTRAP_COUNTRY))
     # Địa chỉ phải khớp IP của chặng gửi PM/tax/approve -> dùng provider proxy
     billing = upi_billing_profile(provider_proxy or checkout_proxy)
     log(f"starting UPI extraction, attempt {attempt}/{max_retry}")
@@ -3324,7 +3465,7 @@ def run_once(
         "combo test: "
         f"{checkout_country} / {billing['country']} / {currency_for_country(checkout_country)} / "
         f"{payment_browser_locale()} / "
-        f"{os.environ.get('UPI_PROVIDER_COUNTRY_LABEL', UPI_PROVIDER_COUNTRY).strip() or UPI_PROVIDER_COUNTRY}"
+        f"{str(env_value('UPI_PROVIDER_COUNTRY_LABEL', UPI_PROVIDER_COUNTRY) or '').strip() or UPI_PROVIDER_COUNTRY}"
     )
     if stop_event and stop_event.is_set():
         raise RuntimeError("task stopped; skipping this round")
@@ -3554,7 +3695,7 @@ def run_single_link_attempt(
             return attempt, "", "task stopped; skipping this round", False
         billing = upi_billing_profile((provider_proxies or checkout_proxies or [""])[0])
         pm_country = billing["country"]
-        device_id = str(uuid.uuid4())
+        device_id = new_device_id(access_token)
         checkout_candidates = pick_random_proxies(checkout_proxies, checkout_retry, "checkout")
         checkout: dict[str, str] | None = None
         promotion_proxy = ""
@@ -3608,7 +3749,7 @@ def run_single_link_attempt(
             return attempt, "", "task stopped; skipping this round", False
         _log_context.prefix = f"[UPI {attempt}/{upi_retry}][PM={pm_country}] "
         try:
-            redirect_url, _qr_urls = run_provider_flow(
+            redirect_url, qr_urls = run_provider_flow(
                 access_token,
                 session_token,
                 checkout_proxy_used,
@@ -3641,6 +3782,12 @@ def run_single_link_attempt(
                 log(f"account/customer risk, stopping account: {error[:180]}", "[WARN] ")
                 approve_blocked = True
                 stop_event.set()
+            elif "promo_not_eligible" in error:
+                # Account không được hưởng promo 0₫ — cũng là account-level, KHÔNG phải
+                # lỗi proxy: đừng phạt proxy, và đừng thử round/proxy khác cho account này.
+                log(f"account not eligible for 0-value promo, stopping: {error[:180]}", "[WARN] ")
+                approve_blocked = True
+                stop_event.set()
             else:
                 record_failure_by_stage(error, checkout_proxy_used, provider_proxy, promotion_proxy)
                 log(f"provider failed: {error[:220]}", "[WARN] ")
@@ -3667,10 +3814,10 @@ def run_single_link_parallel_mode(
     requested_workers = env_int("UPI_WORKERS", 1)
     worker_limit = env_int("UPI_WORKERS_MAX", requested_workers)
     workers = min(max(1, requested_workers), max(1, worker_limit), upi_retry)
-    checkout_country = normalize_country(os.environ.get("UPI_CHECKOUT_COUNTRY", UPI_BOOTSTRAP_COUNTRY))
+    checkout_country = normalize_country(env_value("UPI_CHECKOUT_COUNTRY", UPI_BOOTSTRAP_COUNTRY))
     checkout_currency = currency_for_country(checkout_country)
     configured_pm_country = normalize_country(
-        os.environ.get("UPI_BILLING_COUNTRY", UPI_PROVIDER_COUNTRY)
+        env_value("UPI_BILLING_COUNTRY", UPI_PROVIDER_COUNTRY)
     )
     max_blocked = env_int("UPI_MAX_APPROVE_BLOCKED", upi_retry)
     approve_blocked_count = 0
@@ -3772,6 +3919,7 @@ def run_single_link_mode(
     access_token: str,
     session_token: str,
     proxy_seeds: list[str],
+    stop_event: Event | None = None,
 ) -> int:
     upi_workers = env_int("UPI_WORKERS", 1)
     if upi_workers > 1:
@@ -3780,15 +3928,15 @@ def run_single_link_mode(
     checkout_retry = env_int("UPI_CHECKOUT_RETRY_MAX", 1)
     provider_retry = env_int("UPI_PROVIDER_RETRY_MAX", 1)
     upi_retry = env_int("UPI_MAX_RETRY", 1)
-    checkout_country = normalize_country(os.environ.get("UPI_CHECKOUT_COUNTRY", UPI_BOOTSTRAP_COUNTRY))
+    checkout_country = normalize_country(env_value("UPI_CHECKOUT_COUNTRY", UPI_BOOTSTRAP_COUNTRY))
     checkout_currency = currency_for_country(checkout_country)
     configured_pm_country = normalize_country(
-        os.environ.get("UPI_BILLING_COUNTRY", UPI_PROVIDER_COUNTRY)
+        env_value("UPI_BILLING_COUNTRY", UPI_PROVIDER_COUNTRY)
     )
     max_blocked = env_int("UPI_MAX_APPROVE_BLOCKED", upi_retry)
     approve_blocked_count = 0
     last_error = ""
-    stop_event = Event()
+    stop_event = stop_event or Event()
     attempted_seed_keys: set[str] = set()
 
     log(
@@ -3800,7 +3948,7 @@ def run_single_link_mode(
     for attempt in range(1, upi_retry + 1):
         billing = upi_billing_profile(proxy_seeds[0] if proxy_seeds else "")
         pm_country = billing["country"]
-        device_id = str(uuid.uuid4())
+        device_id = new_device_id(access_token)
         available_seeds = [
             proxy_seed
             for proxy_seed in proxy_seeds
@@ -3875,7 +4023,11 @@ def run_single_link_mode(
         previous_log_context = getattr(_log_context, "prefix", "")
         _log_context.prefix = f"  [PM={pm_country}] "
         try:
-            redirect_url, _qr_urls = run_provider_flow(
+            # Vì sao đổi `_qr_urls` -> `qr_urls`: khối này chỉ chạy khi CÓ redirect_url
+            # (tức là lúc thành công). Trước đây tên bị lệch (`_qr_urls` lúc gán nhưng
+            # `qr_urls` lúc dùng) nên mọi lần lấy được link ở mode cs đều ném NameError
+            # và bị ghi nhận là FAIL — link có thật nhưng bị vứt đi.
+            redirect_url, qr_urls = run_provider_flow(
                 access_token,
                 session_token,
                 checkout_proxy_used,
@@ -3889,6 +4041,7 @@ def run_single_link_mode(
             )
             if redirect_url:
                 record_proxy_result("seed", checkout_proxy_used, True, "success")
+                emit_result(status="LINK", upi_link=redirect_url, qr_urls=list(qr_urls))
                 print("\n===== RESULT =====")
                 print(f"UPI final pay URL:\n{redirect_url}")
                 if env_bool("UPI_SAVE_LINK_ARTIFACT", False):
@@ -3954,7 +4107,7 @@ def main() -> int:
         return 1
 
     proxy_seeds = load_proxy_seeds()
-    flow_mode = os.environ.get("UPI_FLOW_MODE", "single").strip().lower() or "single"
+    flow_mode = str(env_value("UPI_FLOW_MODE", "single") or "").strip().lower() or "single"
     if flow_mode != "single":
         log(f"UPI_FLOW_MODE={flow_mode} collapsed to strict single-seed chain", "[WARN] ")
     return run_single_link_mode(access_token, session_token, proxy_seeds)
