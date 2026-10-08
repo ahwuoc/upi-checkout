@@ -141,10 +141,11 @@ def api_jobs() -> dict:
 
 @app.get("/api/stats/global")
 def api_stats_global() -> dict:
-    """Thống kê global: mỗi ngày trích xuất được bao nhiêu mã.
+    """Thống kê global: mỗi ngày trích xuất được bao nhiêu mã ₹0.00.
 
-    Quét file kết quả trên đĩa (web + CLI) nên sống qua restart, có cache theo
-    (mtime, size) nên mở trang không phải chờ quét lại.
+    Chỉ đếm mã ₹0 (mã giá gốc không dùng được). Quét file kết quả trên đĩa
+    (web + CLI) nên sống qua restart, có cache theo (mtime, size) nên mở trang
+    không phải chờ quét lại.
     """
     return global_stats.daily()
 

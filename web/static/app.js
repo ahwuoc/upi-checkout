@@ -2312,27 +2312,27 @@ async function loadGlobalStats() {
 function renderGlobalStats(data) {
   const all = data.days || [];
   const days = all.slice(0, GSTATS_MAX_DAYS).reverse();   // trục thời gian: cũ -> mới
-  const total = data.total_codes || 0;
+  const total = data.total || 0;
   els.gstatsCodes.textContent = String(total);
   els.gstatsMeta.textContent = total
     ? (data.total_days + ' ngày · ' + data.total_jobs + ' job')
     : 'chưa có dữ liệu';
 
   if (!days.length) {
-    els.gstatsChart.innerHTML = '<div class="gstats-empty">Chưa trích xuất được mã nào</div>';
+    els.gstatsChart.innerHTML = '<div class="gstats-empty">Chưa trích xuất được mã ₹0.00 nào</div>';
   } else {
-    const max = Math.max.apply(null, days.map(d => d.codes).concat([1]));
+    const max = Math.max.apply(null, days.map(d => d.zero).concat([1]));
     const today = new Date().toISOString().slice(0, 10);
     els.gstatsChart.innerHTML = days.map(d => {
       const cls = 'gbar'
-        + (d.codes ? '' : ' is-zero')
-        + (d.codes && d.codes === max ? ' is-best' : '')
+        + (d.zero ? '' : ' is-zero')
+        + (d.zero && d.zero === max ? ' is-best' : '')
         + (d.date === today ? ' is-today' : '');
-      const tip = d.date + ': ' + d.codes + ' mã · ' + d.jobs + ' job'
-        + ' (web ' + d.web + ' · cli ' + d.cli + ')';
-      const pct = d.codes ? Math.max(4, Math.round((d.codes / max) * 100)) : 2;
+      const tip = d.date + ': ' + d.zero + ' mã ₹0.00 · ' + d.jobs + ' job'
+        + (d.unknown ? ' · ' + d.unknown + ' mã chưa rõ giá' : '');
+      const pct = d.zero ? Math.max(4, Math.round((d.zero / max) * 100)) : 2;
       return '<div class="' + cls + '" title="' + tip + '">'
-        + '<span class="gbar-value">' + d.codes + '</span>'
+        + '<span class="gbar-value">' + d.zero + '</span>'
         + '<div class="gbar-track"><div class="gbar-fill" style="height:' + pct + '%"></div></div>'
         + '<span class="gbar-date">' + d.date.slice(5) + '</span>'
         + '</div>';
@@ -2340,8 +2340,10 @@ function renderGlobalStats(data) {
   }
 
   const more = all.length - days.length;
-  els.gstatsFoot.innerHTML = 'Tổng <b>' + total + '</b> mã'
-    + (data.total_unique !== total ? ' (<b>' + data.total_unique + '</b> mã phân biệt)' : '')
+  els.gstatsFoot.innerHTML = 'Tổng <b>' + total + '</b> mã ₹0.00'
+    + (data.unknown_amount
+        ? ' · <b>' + data.unknown_amount + '</b> mã có link nhưng chưa rõ giá (không tính là ₹0)'
+        : '')
     + (more > 0 ? ' · hiện ' + days.length + '/' + all.length + ' ngày gần nhất' : '')
     + ' · cập nhật ' + (data.scanned_at || '');
 }
