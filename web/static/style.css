@@ -192,32 +192,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visib
 .gstats-foot { color: var(--subtle); font-size: 11px; line-height: 1.6; }
 .gstats-foot b { color: var(--muted); font-weight: 600; }
 
-.queue-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
-.qstat {
-  --stat-color: var(--muted);
-  display: flex;
-  min-width: 0;
-  min-height: 124px;
-  flex-direction: column;
-  justify-content: center;
-  gap: 8px;
-  padding: 16px 18px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-}
-.qstat-num { color: var(--text); font-size: 30px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; letter-spacing: -.04em; }
-.qstat-label { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
-.qstat-label::before { width: 6px; height: 6px; flex-shrink: 0; background: var(--stat-color); border-radius: 50%; content: ""; }
-.qstat-hint { color: var(--subtle); font-size: 11px; }
-.qstat.is-running { --stat-color: var(--blue); }
-.qstat.is-queued { --stat-color: var(--amber); }
-.qstat.is-ok { --stat-color: var(--green); background: #17211d; border-color: #2e473a; }
-.qstat.is-fail { --stat-color: var(--red); }
-/* Đã dừng không phải lỗi -> xám, không dùng đỏ */
-.qstat.is-stop .qstat-num { color: var(--muted); }
-
 .overall { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(80px, 1fr) auto; align-items: center; gap: 18px; margin-top: 14px; padding: 14px 18px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
 .overall .stop-note { grid-column: 1 / -1; }
 .progress-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; }
@@ -700,8 +674,6 @@ body[data-filter="success"][data-view="grid"] .step-grid { grid-template-columns
   .sidebar-content { padding: 22px 18px; }
   .sidebar-footer { padding: 16px 18px; }
   .main { padding: 28px 22px; }
-  .qstat { padding: 14px 12px; }
-  .qstat-hint { display: none; }
   .overall { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px 18px; }
   .overall-count { grid-column: 1 / -1; }
 }
@@ -715,7 +687,6 @@ body[data-filter="success"][data-view="grid"] .step-grid { grid-template-columns
   .mobile-jump { display: inline-flex; align-items: center; justify-content: center; gap: 6px; margin-left: auto; color: var(--primary); font-size: 12px; text-decoration: none; }
   .panel-actions .mobile-jump { margin-left: 0; }
   .main { height: auto; min-height: 520px; overflow: visible; padding: 28px 22px 36px; scroll-margin-top: 16px; }
-  .qstat { min-height: 106px; }
   .empty-state { min-height: 300px; height: auto; }
 }
 
@@ -727,10 +698,6 @@ body[data-filter="success"][data-view="grid"] .step-grid { grid-template-columns
   .panel-actions { display: grid; width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .panel-actions .btn-ghost { min-height: 40px; }
   .panel-actions .mobile-jump { display: inline-flex; }
-  .queue-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-  .qstat { min-height: 102px; padding: 16px; }
-  .qstat:last-child { grid-column: 1 / -1; min-height: 56px; flex-direction: row; align-items: center; justify-content: space-between; }
-  .qstat:last-child .qstat-num { font-size: 24px; }
   .overall { padding: 14px; }
   .overall-count { font-size: 10px; }
   .tasks-heading { align-items: flex-start; }

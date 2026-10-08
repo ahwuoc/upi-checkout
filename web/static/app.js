@@ -68,11 +68,6 @@ const els = {
   jobIdInput: document.getElementById('job-id-input'),
   jobIdLoad: document.getElementById('job-id-load'),
   jobIdList: document.getElementById('job-id-list'),
-  statRunning: document.getElementById('stat-running'),
-  statQueued: document.getElementById('stat-queued'),
-  statSuccess: document.getElementById('stat-success'),
-  statFail: document.getElementById('stat-fail'),
-  statStopped: document.getElementById('stat-stopped'),
   overallCount: document.getElementById('overall-count'),
   btnSuccess: document.getElementById('btn-success'),
   btnRefresh: document.getElementById('btn-refresh'),
@@ -1211,12 +1206,6 @@ function countByStatus() {
 
 function updateCounters() {
   const c = countByStatus();
-
-  els.statRunning.textContent = c.running;
-  els.statQueued.textContent = c.queued;
-  els.statSuccess.textContent = c.success;
-  els.statFail.textContent = c.fail;
-  els.statStopped.textContent = c.stopped;
 
   const total = state.total || tasks.size || 0;
   const pct = total ? Math.round(((c.success + c.fail) / total) * 100) : 0;
