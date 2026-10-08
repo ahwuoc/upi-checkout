@@ -1556,6 +1556,9 @@ function updateTokenCount() {
 
 function setSubmitState() {
   const n = getTokens().length;
+  // Ghi thẳng id job lên nút Stop: lỗi cũ là UI hiển thị một job mà lệnh Stop lại
+  // gửi cho job khác, nên người dùng bấm Stop mà batch đang xem vẫn chạy.
+  const jidTag = state.jobId ? (' · ' + state.jobId) : '';
   if (state.starting) {
     // POST /api/run còn treo vì server đang quét/lọc pool proxy — lúc này chưa có
     // job để "dừng", nên bấm nút chỉ gây lỗi; hiện trạng thái bận cho rõ.
@@ -1563,11 +1566,13 @@ function setSubmitState() {
     els.submit.classList.remove('danger');
     els.submit.disabled = true;
   } else if (state.stopping) {
-    els.submit.textContent = 'Stopping…';
+    // Vẫn bấm được: gửi lại lệnh dừng là vô hại, và nút chết cứng suốt vài phút
+    // (task đang chạy phải unwound xong) chính là cảm giác "ấn Stop không dừng".
+    els.submit.textContent = 'Stopping…' + jidTag;
     els.submit.classList.add('danger');
-    els.submit.disabled = true;
+    els.submit.disabled = false;
   } else if (state.running) {
-    els.submit.textContent = 'Stop job';
+    els.submit.textContent = 'Stop job' + jidTag;
     els.submit.classList.add('danger');
     els.submit.disabled = false;
   } else {
@@ -2004,24 +2009,50 @@ async function runJob() {
 }
 
 async function stopJob() {
-  if (!state.jobId || state.stopping) return;
+  // Trước đây hàm này `return` im lặng khi thiếu jobId hoặc khi đang stopping —
+  // bấm Stop mà không thấy gì xảy ra, không biết là lệnh không gửi được hay đã gửi
+  // nhầm job. Giờ mọi nhánh đều phải nói ra.
+  if (!state.jobId) {
+    toast('Chưa gắn job nào để dừng — bấm Refresh hoặc chọn job trong lịch sử');
+    return;
+  }
   const jid = state.jobId;
+  const reSending = state.stopping;
   try {
     const res = await fetch('/api/stop/' + jid, { method: 'POST' });
     if (!res.ok) {
-      let message = 'Could not stop job';
+      let message = 'Không gửi được lệnh dừng';
       try { const body = await res.json(); if (body.detail) message = body.detail; } catch (e) { /* ignore */ }
       toast(message);
       return;
     }
   } catch (e) {
-    toast('Connection lost sending stop request');
+    toast('Mất kết nối khi gửi lệnh dừng');
     return;
   }
-  if (!state.running) return;
+
+  // Xác nhận server ĐÃ nhận cho ĐÚNG job này, và còn bao nhiêu task phải chạy nốt.
+  let left = null;
+  try {
+    const res = await fetch('/api/state/' + jid);
+    if (res.ok) {
+      const d = await res.json();
+      const running = (d.tasks || []).filter(t => t.status === 'running').length;
+      left = running;
+      if (d.stop_requested === false) {
+        toast('Server chưa ghi nhận lệnh dừng cho job ' + jid + ' — thử lại');
+        return;
+      }
+    }
+  } catch (e) { /* không xác nhận được thì vẫn báo đã gửi */ }
+
   state.stopping = true;
   setSubmitState();
-  toast('Stopping · running tasks finish first');
+  const tail = (left === null)
+    ? ''
+    : ' — còn ' + left + ' task đang chạy phải kết thúc trước';
+  toast((reSending ? 'Đã gửi lại lệnh dừng job ' : 'Đã gửi lệnh dừng job ') + jid + tail);
+  setStopNote('Đang dừng job ' + jid + tail);
 }
 
 /* Đẩy token đang có trong ô "Access tokens" vào queue của JOB HIỆN TẠI.
@@ -2067,6 +2098,13 @@ function updatePushQueue() {
   if (!running) return;
   const n = getTokens().length;
   if (els.pushQueueCount) els.pushQueueCount.textContent = String(n);
+  // Job đang dừng thì server từ chối nhận thêm (engine.append_tasks) — chặn ở đây
+  // để không bấm được rồi nhận lỗi, và nói rõ lý do.
+  if (state.stopping) {
+    els.pushQueue.disabled = true;
+    els.pushQueue.title = 'Job đang dừng — đợi dừng xong rồi bấm Run để tạo job mới';
+    return;
+  }
   els.pushQueue.disabled = n === 0;
   els.pushQueue.title = n === 0
     ? 'Ô Access tokens đang trống — dán token vào trước'
@@ -2283,7 +2321,10 @@ async function init() {
       const data = await res.json();
       renderJobHistory(data.jobs || []);
       const running = (data.jobs || []).filter(j => j.status === 'running');
-      const latest = running[running.length - 1] || (data.jobs || [])[0];
+      // /api/jobs trả MỚI NHẤT trước, nên job đang chạy mới nhất là running[0].
+      // Lấy running[length-1] là gắn vào job CŨ NHẤT — sai đúng lúc có nhiều job
+      // đang chạy, và làm nút Stop nhắm vào job khác với cái đang xem.
+      const latest = running[0] || (data.jobs || [])[0];
       if (latest) attachJob(latest.job_id);
     }
   } catch (e) {

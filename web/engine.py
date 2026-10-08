@@ -197,6 +197,10 @@ class Job:
         self.duration_ms: int | None = None
         self._t0 = time.time()
         self._lock = threading.Lock()
+        # 1 hang so slot dung CHUNG cho ca job. Moi duong chay task (chay dau, push vao
+        # queue, retry le) deu phai qua day, nen du co nhieu ThreadPool/thread thi tong
+        # so task chay song song luon dung bang workers — khong the vuot.
+        self._slots = threading.BoundedSemaphore(max(1, int(workers)))
         self._subs: list[queue.Queue] = []
 
         # Log ben vung: moi job 1 file, khong mat khi restart server.
@@ -1368,6 +1372,17 @@ def _run_with_retries(job: Job, task: Task, proxy_file: Path,
             break
 
 
+def _run_task_limited(job: Job, task: Task, proxy_file: Path, proxies: list[str]) -> None:
+    """Chay 1 task qua slot chung cua job (boc ngoai _run_with_retries).
+
+    Truoc day moi duong tu tao ThreadPool rieng (chay dau 1 pool, push queue 1 pool),
+    nen workers=200 ma push them la chay 400. Gio semaphore cua job la noi duy nhat
+    quyet dinh so task song song.
+    """
+    with job._slots:
+        _run_with_retries(job, task, proxy_file, proxies)
+
+
 def _job_worker(job: Job, proxy_file: Path, proxies: list[str]) -> None:
     for tid in job.order:
         job.emit({"type": "task_init", "task_id": tid, "index": job.tasks[tid].index,
@@ -1381,7 +1396,7 @@ def _job_worker(job: Job, proxy_file: Path, proxies: list[str]) -> None:
             job.emit({"type": "task_done", "task_id": tid, "ok": False,
                       "status": "STOPPED", "error": "job stopped", "duration_ms": 0})
             return
-        _run_with_retries(job, job.tasks[tid], proxy_file, proxies)
+        _run_task_limited(job, job.tasks[tid], proxy_file, proxies)
 
     with ThreadPoolExecutor(max_workers=max(1, min(job.workers, job.total))) as ex:
         list(ex.map(work, job.order))
@@ -1494,7 +1509,7 @@ def retry_task(job_id: str, task_id: str) -> bool:
 
     task.logs = []
     _reset_task_for_retry(job, task)
-    threading.Thread(target=_run_with_retries, args=(job, task, proxy_file, proxies),
+    threading.Thread(target=_run_task_limited, args=(job, task, proxy_file, proxies),
                      daemon=True).start()
     return True
 
@@ -1513,6 +1528,13 @@ def append_tasks(job_id: str, tokens: list[str]) -> dict:
     job = get_job(job_id)
     if job is None:
         return {"ok": False, "error": "job does not exist", "added": 0, "skipped": 0}
+
+    # Job đang được yêu cầu dừng: KHÔNG nhận thêm. Trước đây push lúc này vẫn nhận
+    # và phần vừa push chạy tiếp (đường append không kiểm tra cờ stop) -> bấm Stop
+    # xong job vẫn chạy, đúng cảm giác "ấn Stop mà không dừng".
+    if job.stop_requested:
+        return {"ok": False, "added": 0, "skipped": 0,
+                "error": "job đang dừng — không push thêm được. Đợi dừng xong rồi bấm Run."}
 
     clean = [str(t).strip() for t in (tokens or []) if str(t).strip()]
     with job._lock:
@@ -1578,13 +1600,23 @@ def append_tasks(job_id: str, tokens: list[str]) -> dict:
               f"đã thêm {len(new_ids)} acc vào queue (bỏ qua {skipped} acc trùng) — tổng {job.total}"})
     job.write_results()
 
+    def _run_one_added(tid: str) -> None:
+        t = job.tasks.get(tid)
+        if t is None:
+            return
+        # Task push vào queue vẫn phải chịu lệnh Stop như task chạy đầu. Thiếu
+        # nhánh này thì bấm Stop xong phần vừa push vẫn chạy hết -> job "không dừng".
+        if job.stop_requested:
+            t.status = "stopped"
+            job.emit({"type": "task_done", "task_id": tid, "ok": False,
+                      "status": "STOPPED", "error": "job stopped", "duration_ms": 0})
+            return
+        _run_task_limited(job, t, proxy_file, proxies)
+
     def _run_added() -> None:
         try:
             with ThreadPoolExecutor(max_workers=max(1, min(job.workers, len(new_ids)))) as ex:
-                list(ex.map(
-                    lambda tid: (job.tasks.get(tid) is not None
-                                 and _run_with_retries(job, job.tasks[tid], proxy_file, proxies)),
-                    new_ids))
+                list(ex.map(_run_one_added, new_ids))
         except Exception as exc:  # noqa: BLE001 — vòng nền không được chết
             job.log_line("[append] error: %s" % str(exc)[:160])
         # Không còn task nào chạy -> đóng job (phần thêm đã xong)
