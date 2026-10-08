@@ -122,6 +122,10 @@ const els = {
   warning: document.getElementById('warning'),
   submit: document.getElementById('submit'),
   stopNote: document.getElementById('stop-note'),
+  gstatsCodes: document.getElementById('gstats-codes'),
+  gstatsMeta: document.getElementById('gstats-meta'),
+  gstatsChart: document.getElementById('gstats-chart'),
+  gstatsFoot: document.getElementById('gstats-foot'),
   historyBox: document.getElementById('history-box'),
   historyList: document.getElementById('history-list'),
   historyCount: document.getElementById('history-count'),
@@ -1830,6 +1834,7 @@ function onJobDone(evt) {
     setStopNote(evt.stop_reason);
   }
   fillJobIdList();   // job vừa xong đã có file kết quả -> cập nhật lại lịch sử
+  loadGlobalStats(); // job xong mới ghi file kết quả -> số mã theo ngày vừa đổi
 }
 
 function closeES() {
@@ -2298,6 +2303,60 @@ function bindEvents() {
   });
 }
 
+/* ------------------- thống kê global: mã theo ngày ------------------ */
+
+/* Số liệu server gom từ file kết quả trên đĩa (web + CLI) nên sống qua restart,
+   và không phụ thuộc job đang mở trên màn hình. */
+const GSTATS_MAX_DAYS = 14;
+
+async function loadGlobalStats() {
+  if (!els.gstatsChart) return;
+  try {
+    const res = await fetch('/api/stats/global');
+    if (!res.ok) return;
+    renderGlobalStats(await res.json());
+  } catch (e) {
+    // Panel phụ: lỗi mạng ở đây không được làm hỏng phần còn lại của trang.
+  }
+}
+
+function renderGlobalStats(data) {
+  const all = data.days || [];
+  const days = all.slice(0, GSTATS_MAX_DAYS).reverse();   // trục thời gian: cũ -> mới
+  const total = data.total_codes || 0;
+  els.gstatsCodes.textContent = String(total);
+  els.gstatsMeta.textContent = total
+    ? (data.total_days + ' ngày · ' + data.total_jobs + ' job')
+    : 'chưa có dữ liệu';
+
+  if (!days.length) {
+    els.gstatsChart.innerHTML = '<div class="gstats-empty">Chưa trích xuất được mã nào</div>';
+  } else {
+    const max = Math.max.apply(null, days.map(d => d.codes).concat([1]));
+    const today = new Date().toISOString().slice(0, 10);
+    els.gstatsChart.innerHTML = days.map(d => {
+      const cls = 'gbar'
+        + (d.codes ? '' : ' is-zero')
+        + (d.codes && d.codes === max ? ' is-best' : '')
+        + (d.date === today ? ' is-today' : '');
+      const tip = d.date + ': ' + d.codes + ' mã · ' + d.jobs + ' job'
+        + ' (web ' + d.web + ' · cli ' + d.cli + ')';
+      const pct = d.codes ? Math.max(4, Math.round((d.codes / max) * 100)) : 2;
+      return '<div class="' + cls + '" title="' + tip + '">'
+        + '<span class="gbar-value">' + d.codes + '</span>'
+        + '<div class="gbar-track"><div class="gbar-fill" style="height:' + pct + '%"></div></div>'
+        + '<span class="gbar-date">' + d.date.slice(5) + '</span>'
+        + '</div>';
+    }).join('');
+  }
+
+  const more = all.length - days.length;
+  els.gstatsFoot.innerHTML = 'Tổng <b>' + total + '</b> mã'
+    + (data.total_unique !== total ? ' (<b>' + data.total_unique + '</b> mã phân biệt)' : '')
+    + (more > 0 ? ' · hiện ' + days.length + '/' + all.length + ' ngày gần nhất' : '')
+    + ' · cập nhật ' + (data.scanned_at || '');
+}
+
 async function init() {
   const restored = loadForm();
   bindEvents();
@@ -2313,6 +2372,8 @@ async function init() {
   updateCounters();
   updateEmptyState();
   if (restored && getTokens().length) toast('Restored saved form');
+
+  loadGlobalStats();   // panel phụ: chạy song song, không chặn phần còn lại
 
   // Auto-attach to the newest running job if one exists.
   try {

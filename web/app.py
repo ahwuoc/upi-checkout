@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 import engine
 import artifact_probe
+import global_stats
 
 HERE = Path(__file__).resolve().parent
 STATIC = HERE / "static"
@@ -136,6 +137,16 @@ def api_run(req: RunRequest) -> dict:
 @app.get("/api/jobs")
 def api_jobs() -> dict:
     return {"jobs": engine.list_jobs()}
+
+
+@app.get("/api/stats/global")
+def api_stats_global() -> dict:
+    """Thống kê global: mỗi ngày trích xuất được bao nhiêu mã.
+
+    Quét file kết quả trên đĩa (web + CLI) nên sống qua restart, có cache theo
+    (mtime, size) nên mở trang không phải chờ quét lại.
+    """
+    return global_stats.daily()
 
 
 @app.get("/api/log/{job_id}")
