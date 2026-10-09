@@ -2329,6 +2329,7 @@ function renderGlobalStats(data) {
         + (d.zero && d.zero === max ? ' is-best' : '')
         + (d.date === today ? ' is-today' : '');
       const tip = d.date + ': ' + d.zero + ' ₹0.00 codes · '
+        + (d.paid || 0) + ' paid · '
         + d.jobs + (d.jobs === 1 ? ' job' : ' jobs');
       const pct = d.zero ? Math.max(4, Math.round((d.zero / max) * 100)) : 2;
       return '<div class="' + cls + '" title="' + tip + '">'
