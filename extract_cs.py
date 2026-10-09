@@ -1324,6 +1324,33 @@ def load_proxy_seeds() -> list[str]:
     return proxy_seeds
 
 
+def _guard_session_stop(session: Any) -> Any:
+    """Cho session biết lệnh Stop: kiểm tra trước MỖI request.
+
+    Vì sao cần: `check_cancelled()` trước đây chỉ chạy đúng một lần lúc task bắt đầu,
+    nên task đang nằm trong vòng retry của checkout/Stripe không hề biết đã bấm Stop —
+    phải chạy hết vòng đó mới quay về được mốc kiểm tra. Đo thực tế trên job 1000 acc:
+    bấm Stop lúc 23:05:56, task t703 vẫn còn thử checkout ở 23:06:12/29/35/42/48 và
+    chỉ thoát ở 23:06:49 — chậm 53 giây. Kiểm tra ở đây cắt ngay trước request kế tiếp,
+    tức là trong vòng ~1 request thay vì cả một vòng retry.
+
+    `check_cancelled()` ném `FlowCancelled` (BaseException) nên không bị các
+    `except Exception` của vòng retry nuốt mất — đúng chủ đích thiết kế của nó.
+    """
+    original = session.request
+
+    def guarded(*args: Any, **kwargs: Any) -> Any:
+        check_cancelled()
+        return original(*args, **kwargs)
+
+    try:
+        session.request = guarded
+    except (AttributeError, TypeError):
+        # Kiểu session không cho gán (đổi thư viện chẳng hạn): chạy như cũ, không chết task.
+        return session
+    return session
+
+
 def new_session(proxy: str = "", use_pre_proxy: bool = True) -> Any:
     pre_proxy = pre_proxy_url() if use_pre_proxy else ""
     register_proxy_for_redaction(pre_proxy)
@@ -1344,7 +1371,7 @@ def new_session(proxy: str = "", use_pre_proxy: bool = True) -> Any:
         session.trust_env = False
     if proxy:
         set_proxy(session, proxy)
-    return session
+    return _guard_session_stop(session)
 
 
 def _redact_text(text: str, limit: int | None = None) -> str:
