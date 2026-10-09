@@ -18,6 +18,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -171,22 +172,90 @@ _CHROME146_CH = (
 )
 
 
-def _run_node(request: dict, timeout: int) -> dict:
-    """Chạy sentinel_runner.js 1 lần, trả dict (rỗng nếu node lỗi/timeout)."""
-    node = shutil.which("node") or "node"
+def _stop_requested() -> bool:
+    """Task đang chạy trên thread này đã bị yêu cầu dừng chưa?
+
+    Đọc đúng cờ mà `extract_cs.check_cancelled()` đọc (thread-local của
+    execution_context) để không tồn tại hai nguồn sự thật. Import muộn vì
+    `extract_cs` cũng import module này.
+    """
     try:
-        completed = subprocess.run(
+        import extract_cs
+    except ImportError:
+        return False
+    context = getattr(extract_cs._run_context, "value", None)
+    if not context:
+        return False
+    should_stop = context.get("should_stop")
+    try:
+        return bool(should_stop and should_stop())
+    except Exception:  # noqa: BLE001 — cờ hỏng không được làm chết task
+        return False
+
+
+def _run_node(request: dict, timeout: int) -> dict:
+    """Chạy sentinel_runner.js 1 lần, trả dict (rỗng nếu node lỗi/timeout/bị dừng).
+
+    Vì sao dùng Popen chứ không phải subprocess.run: `run` chặn cứng đến khi node
+    xong, mà timeout ở đây tối thiểu 45s — nên bấm Stop thì task đang chờ sentinel
+    phải đợi hết, không thoát được ở mốc kiểm tra kế tiếp. Ở đây dò cờ Stop mỗi
+    0.1s và kill node ngay, nên Stop cắt được cả lúc đang chờ sentinel.
+    """
+    node = shutil.which("node") or "node"
+    limit = max(45, timeout + 10)
+    try:
+        proc = subprocess.Popen(
             [node, str(SENTINEL_RUNNER)],
-            input=json.dumps(request, separators=(",", ":")),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True,
-            capture_output=True,
-            timeout=max(45, timeout + 10),
-            check=False,
         )
+    except OSError:
+        return {}
+
+    out: list[str] = []
+
+    def _feed() -> None:
+        try:
+            proc.stdin.write(json.dumps(request, separators=(",", ":")))
+            proc.stdin.close()
+        except OSError:
+            pass
+
+    def _read() -> None:
+        try:
+            out.append(proc.stdout.read() or "")
+        except (OSError, ValueError):
+            pass
+
+    threading.Thread(target=_feed, name="sentinel-feed", daemon=True).start()
+    reader = threading.Thread(target=_read, name="sentinel-read", daemon=True)
+    reader.start()
+
+    deadline = time.monotonic() + limit
+    stopped = False
+    while proc.poll() is None:
+        if _stop_requested():
+            stopped = True
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.1)
+
+    if proc.poll() is None:
+        try:
+            proc.kill()          # luôn thu hồi: không để lại node mồ côi
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
+        pass
+    reader.join(timeout=2)
+
+    if stopped:
         return {}
     try:
-        payload = json.loads(completed.stdout or "{}")
+        payload = json.loads("".join(out) or "{}")
     except (ValueError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
