@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import queue
+import re
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +66,7 @@ class RunRequest(BaseModel):
     mode: str = "auto"
     country: str = "IN"
     promo: str = "off"
-    workers: int = 4
+    workers: int = Field(default=4, ge=1, le=engine.MAX_WORKERS)
     retries: int = Field(default=3, ge=0, le=5)
     proxies: str | None = None
 
@@ -124,8 +125,6 @@ def api_run(req: RunRequest) -> dict:
         raise HTTPException(400, "No access tokens provided.")
     if req.mode not in MODES:
         raise HTTPException(400, f"invalid mode: {req.mode}")
-    if req.workers < 1 or req.workers > 200:
-        raise HTTPException(400, "workers must be within 1..200")
     try:
         job = engine.start_job(tokens, req.mode, req.country, req.promo,
                                req.workers, req.proxies, req.retries)
@@ -153,6 +152,8 @@ def api_stats_global() -> dict:
 @app.get("/api/log/{job_id}")
 def api_log(job_id: str, download: int = 0) -> FileResponse:
     """Tải file log của job (bền vững, không mất khi restart)."""
+    if not re.fullmatch(r"[0-9a-f]{12}", job_id):
+        raise HTTPException(404, "no log file for this job")
     job = engine.get_job(job_id)
     if job:
         path = job.log_path
@@ -201,7 +202,7 @@ def api_append(job_id: str, req: AppendRequest) -> dict:
 
     Dùng pool proxy sẵn có của job, nên không phải chấm lại chất lượng proxy.
     """
-    tokens = [ln.strip() for ln in (req.tokens or "").splitlines() if ln.strip()]
+    tokens = _split_tokens(req.tokens)
     if not tokens:
         raise HTTPException(400, "no tokens")
     result = engine.append_tasks(job_id, tokens)
@@ -270,26 +271,44 @@ async def api_stream(job_id: str) -> StreamingResponse:
                      "Connection": "keep-alive"},
         )
 
-    q = job.subscribe()
-
     async def gen():
+        with job._lock:
+            q = job.subscribe()
+            snapshot = job.snapshot()
+        loop = asyncio.get_running_loop()
+        heartbeat = loop.time() + HEARTBEAT_SECS
         try:
             # gui snapshot dau tien de client hien ngay trang thai hien tai
-            yield engine.sse_format({"type": "state", "job": job.snapshot()})
+            yield engine.sse_format({"type": "state", "job": snapshot})
             if job.status != "running":
                 yield engine.sse_format({"type": "job_done", "job_id": job.job_id,
                                          "ok": job.ok, "fail": job.fail, "done": job.done,
                                          "total": job.total, "status": job.status,
                                          "duration_ms": job.duration_ms})
             while True:
-                try:
-                    ev = await asyncio.to_thread(q.get, True, HEARTBEAT_SECS)
-                except queue.Empty:
+                frames = []
+                # Bounded nonblocking batches: idle browsers no longer occupy
+                # the default executor, and bursts amortize ASGI send overhead.
+                for _ in range(128):
+                    try:
+                        ev = q.get_nowait()
+                    except queue.Empty:
+                        break
+                    if ev.get("type") == "resync":
+                        with job._lock:
+                            while not q.empty():
+                                q.get_nowait()
+                            ev = {"type": "state", "job": job.snapshot()}
+                        frames = []
+                    frames.append(engine.sse_format(ev))
+                if frames:
+                    yield "".join(frames)
+                elif loop.time() >= heartbeat:
                     yield ": ping\n\n"
+                    heartbeat = loop.time() + HEARTBEAT_SECS
                     if job.status != "running" and q.empty():
                         break
-                    continue
-                yield engine.sse_format(ev)
+                await asyncio.sleep(0 if frames else 0.05)
         finally:
             job.unsubscribe(q)
 

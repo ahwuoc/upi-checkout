@@ -3,42 +3,45 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>UPI Checkout</title>
+  <meta name="theme-color" content="#0e1217">
+  <meta name="color-scheme" content="dark">
+  <title>UPI Checkout · Payment workspace</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <a class="skip-link" href="#workspace">Skip to tasks</a>
   <div class="app">
     <!-- ===================== LEFT SIDEBAR ===================== -->
-    <aside class="sidebar" id="setup" aria-label="Batch configuration">
+    <aside class="sidebar" id="setup" aria-label="Batch setup">
 
       <div class="sidebar-brand">
         <div class="brand-mark" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none"><path d="M4 7.5 12 3l8 4.5v9L12 21l-8-4.5v-9Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="m8 10 4-2.3 4 2.3v4l-4 2.3L8 14v-4Z" fill="currentColor"/></svg>
         </div>
-        <div class="brand-copy"><strong>UPI Checkout</strong><span>Payment workspace</span></div>
-        <a class="mobile-jump" href="#workspace">View tasks ↓</a>
+        <div class="brand-copy"><strong>UPI Checkout</strong><span>Task operations</span></div>
+        <span class="brand-tag" aria-hidden="true">OPS</span>
+        <a class="mobile-jump" href="#workspace">View tasks ↑</a>
       </div>
 
       <div class="sidebar-content">
       <div class="sidebar-intro">
-        <span class="section-eyebrow">NEW BATCH</span>
-        <h2>Batch setup</h2>
-        <p>Add your accounts and choose how to run.</p>
+        <span class="section-eyebrow">01 / THIẾT LẬP</span>
+        <h2>New batch</h2>
+        <p>Add accounts and set up parallel processing.</p>
       </div>
 
       <!-- Access tokens -->
-      <div class="section">
+      <div class="section tokens-section">
         <div class="section-heading">
           <label class="section-label" for="tokens">Access tokens</label>
-          <span class="token-count" id="token-count">0 tokens detected</span>
+          <span class="token-count" id="token-count">0 token</span>
         </div>
-        <textarea id="tokens" class="tokens-input mono" rows="6" placeholder="Paste access tokens here…" spellcheck="false" aria-describedby="tokens-help"></textarea>
-        <div class="helper" id="tokens-help">One token per line · Up to 1,000 per batch</div>
+        <textarea id="tokens" class="tokens-input mono" rows="5" placeholder="Paste access tokens here…" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="tokens-help"></textarea>
+        <div class="helper" id="tokens-help">One token per line · Up to 1,000 tokens per batch</div>
       </div>
 
       <!-- Payment method -->
-      <div class="section">
+      <div class="section payment-section">
         <label class="section-label" for="payment-method">Payment method</label>
         <select id="payment-method" disabled>
           <option>UPI</option>
@@ -50,10 +53,18 @@
         <span class="section-label">Backend flow</span>
         <div class="segmented" role="radiogroup" aria-label="Backend flow">
           <button type="button" class="seg active" data-mode="auto" role="radio" aria-checked="true">Auto-detect</button>
-          <button type="button" class="seg" data-mode="oaics" role="radio" aria-checked="false">OAICS (open_ai)</button>
-          <button type="button" class="seg" data-mode="cs" role="radio" aria-checked="false">CS (stripe)</button>
+          <button type="button" class="seg" data-mode="oaics" role="radio" aria-checked="false">OAICS</button>
+          <button type="button" class="seg" data-mode="cs" role="radio" aria-checked="false">CS / Stripe</button>
         </div>
         <div class="hint" id="mode-hint"></div>
+      </div>
+
+      <div class="section execution-settings">
+        <div class="field worker-field">
+          <label class="section-label" for="workers">Worker song song</label>
+          <input id="workers" type="number" value="4" min="1" max="200" aria-describedby="workers-help">
+        </div>
+        <div class="helper" id="workers-help">1–200 workers. Raise gradually by RAM and connections; each worker runs one task.</div>
       </div>
 
       <!-- Proxy pool -->
@@ -63,7 +74,7 @@
           <span>Use custom proxy pool</span>
         </label>
         <div class="helper">Defaults to upi-checkout/proxy.txt. Enable to paste your own pool.</div>
-        <textarea id="proxies" class="proxies-input mono" rows="4" placeholder="http://user:pass@host:port" spellcheck="false" hidden></textarea>
+        <textarea id="proxies" class="proxies-input mono" rows="4" placeholder="http://user:pass@host:port" spellcheck="false" autocomplete="off" autocapitalize="off" aria-label="Custom proxy list" hidden></textarea>
         <div class="pool-status" id="pool-status" hidden>
           <span id="pool-count">0 proxy</span>
           <span class="pool-actions">
@@ -75,40 +86,35 @@
 
       <!-- Advanced config -->
       <details class="advanced">
-        <summary>Advanced</summary>
+        <summary>Advanced settings</summary>
         <div class="advanced-body">
           <div class="field">
-            <label for="country">Country</label>
-            <input id="country" type="text" value="IN">
+            <label for="country">Quốc gia</label>
+            <input id="country" type="text" value="IN" maxlength="2" autocapitalize="characters">
           </div>
           <div class="field">
-            <label for="promo">Promo</label>
+            <label for="promo">Promotion</label>
             <select id="promo">
-              <option value="off" selected>off — full price</option>
+              <option value="off" selected>Off — full price</option>
               <option value="campaign">plus-1-month-free</option>
             </select>
-            <span class="helper">Promotions apply to eligible accounts. Check the final amount in each result.</span>
-          </div>
-          <div class="field">
-            <label for="workers">Concurrent workers</label>
-            <input id="workers" type="number" value="4" min="1" max="200">
-            <span class="helper">1–100. Each worker ≈ 70 MB RAM.</span>
+            <span class="helper">Only applies to eligible accounts. Check the final amount in the results.</span>
           </div>
           <div class="field">
             <label for="retries">Retries on failure</label>
             <input id="retries" type="number" value="3" min="0" max="5">
-            <span class="helper">Số lần thử mỗi acc khi bị Stripe chặn. Mỗi lần thử dùng fingerprint + phiên proxy MỚI, chạy tuần tự — nên 3 nghĩa là tốn gấp ~3 thời gian/proxy cho acc đó. 0 = tắt.</span>
+            <span class="helper">0 = no retry. Retries for the same account run sequentially and can increase processing time.</span>
           </div>
         </div>
       </details>
 
       <div class="job-pill">
-        <label class="job-pill-label" for="job-id-input">Open a job</label>
+        <label class="job-pill-label" for="job-id-input">Open batch by ID</label>
         <div class="job-pill-line">
-          <input id="job-id-input" class="job-pill-input mono" placeholder="Enter job ID"
+          <input id="job-id-input" class="job-pill-input mono" placeholder="Nhập job ID"
                  maxlength="12" spellcheck="false" autocomplete="off" list="job-id-list">
           <datalist id="job-id-list"></datalist>
-          <button type="button" class="btn-mini" id="job-id-load" title="Load this job's history">Load</button>
+          <button type="button" class="btn-mini" id="job-id-load" title="Open this batch history">Open ↗</button>
         </div>
       </div>
 
@@ -116,7 +122,7 @@
            (kể cả job đã chết vì restart). Bấm 1 dòng = nạp job đó vào bảng bên phải. -->
       <details class="history" id="history-box">
         <summary>
-          <span>Job history</span>
+          <span>Batch history</span>
           <span class="history-count" id="history-count">0</span>
         </summary>
         <div class="history-list" id="history-list">
@@ -127,14 +133,14 @@
 
       <div class="sidebar-footer">
         <div class="summary-box">
-          <div id="summary-tasks">0 tasks × 1 use each</div>
-          <div class="summary-total" id="summary-total">Total uses: 0</div>
+          <div id="summary-tasks">No tokens yet</div>
+          <div class="summary-total" id="summary-total">Tổng: 0 task</div>
         </div>
         <div class="warning" id="warning" hidden></div>
-        <button type="button" class="submit" id="submit" disabled>Run 0 checkout tasks</button>
+        <button type="button" class="submit" id="submit" disabled>Run 0 tasks</button>
         <button type="button" class="submit btn-push-queue" id="push-queue" disabled
-                title="Đẩy số token đang có trong ô Access tokens vào queue của job hiện tại — không cần bấm Stop, dùng lại pool proxy sẵn có">
-          Push <span id="push-queue-count">0</span> vào queue
+                title="Add tokens to the running queue without stopping the current batch" hidden>
+          Push <span id="push-queue-count">0</span> to queue
         </button>
       </div>
     </aside>
@@ -144,7 +150,7 @@
       <!-- Panel header -->
       <div class="panel-head">
         <div class="panel-title">
-          <span class="panel-kicker">WORKSPACE <span aria-hidden="true">/</span> OVERVIEW</span>
+          <span class="panel-kicker">TASK OPERATIONS <span aria-hidden="true">/</span> OVERVIEW</span>
           <h1>Checkout overview<span class="heading-dot" aria-hidden="true">.</span></h1>
           <p class="panel-sub">Your tasks, payment links and QR codes in one place.</p>
         </div>
@@ -154,7 +160,7 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>
             Success results
           </button>
-          <button type="button" class="btn-ghost" id="btn-notify" title="Sound when a task yields a QR link or the customer approves">
+          <button type="button" class="btn-ghost" id="btn-notify" title="Sound when a QR code appears or the customer confirms">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/></svg>
             <span id="btn-notify-label">Sound</span>
           </button>
@@ -165,23 +171,39 @@
         </div>
       </div>
 
-      <section class="overview" aria-label="Job overview">
+      <section class="runtime" aria-label="Batch performance">
+        <div class="runtime-heading">
+          <span class="section-eyebrow">RUNTIME OVERVIEW</span>
+          <span class="runtime-status" id="runtime-status" data-state="idle" role="status">Ready</span>
+        </div>
+        <dl class="runtime-metrics">
+          <div class="runtime-metric metric-running"><dt><span class="metric-dot" aria-hidden="true"></span>Running</dt><dd id="runtime-running">0</dd><dd class="metric-caption">tasks in progress</dd></div>
+          <div class="runtime-metric"><dt><span class="metric-dot queued-dot" aria-hidden="true"></span>Queued</dt><dd id="runtime-queued">0</dd><dd class="metric-caption">ready to start</dd></div>
+          <div class="runtime-metric"><dt>Configured workers</dt><dd id="runtime-workers">4</dd><dd class="metric-caption">parallel limit</dd></div>
+          <div class="runtime-metric"><dt>Elapsed</dt><dd class="metric-compact" id="runtime-elapsed">—</dd><dd class="metric-caption">since start</dd></div>
+          <div class="runtime-metric"><dt>Throughput</dt><dd class="metric-compact" id="runtime-throughput">—</dd><dd class="metric-caption">tasks done / min</dd></div>
+        </dl>
+      </section>
+
+      <div class="insights-grid">
+      <section class="overview" aria-label="Batch progress">
         <div class="overall">
           <div class="progress-head">
-            <span>Batch progress</span>
+            <span class="section-label">Batch progress</span>
             <span class="pct" id="overall-pct">0%</span>
           </div>
           <div class="progressbar" id="overall-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Queue progress"><div class="fill" id="overall-fill"></div></div>
-          <div class="overall-count" id="overall-count">0/0 done · 0 running · 0 queued</div>
+          <div class="overall-count" id="overall-count">No batch yet</div>
+          <p class="progress-help">New tasks can be pushed into the queue while the current batch is running.</p>
           <div class="stop-note" id="stop-note" role="status" hidden></div>
         </div>
       </section>
 
-      <section class="gstats" aria-label="Global ₹0.00 code stats">
+      <section class="gstats" aria-label="₹0.00 code stats per day">
         <div class="gstats-head">
           <div>
-            <span class="section-eyebrow">GLOBAL</span>
             <div class="section-label">₹0.00 codes extracted per day</div>
+            <span class="section-eyebrow">ALL BATCHES</span>
           </div>
           <div class="gstats-total">
             <strong id="gstats-codes">0</strong> ₹0.00 codes
@@ -191,10 +213,12 @@
         </div>
         <div class="gstats-chart" id="gstats-chart"><div class="gstats-empty">Loading…</div></div>
       </section>
+      </div>
 
       <div class="tasks-heading">
         <h2>Tasks <span>Activity &amp; results</span></h2>
-        <button type="button" class="btn-ghost btn-clear" id="btn-copy-emails" title="Copy email của TẤT CẢ acc đã quét thành công (khách đã duyệt mandate), mỗi dòng một email">
+        <div class="task-heading-actions">
+        <button type="button" class="btn-ghost btn-clear" id="btn-copy-emails" title="Copy the email of every account that scanned successfully (customer approved the mandate), one per line">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 9V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3M6 9h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z"/></svg>
           <span id="btn-copy-emails-label">Copy emails (0)</span>
         </button>
@@ -202,6 +226,7 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
           <span id="btn-clear-tab-label">Clear tab</span>
         </button>
+        </div>
       </div>
 
       <!-- Queue filter tabs -->
@@ -211,9 +236,14 @@
           <button type="button" class="tab" data-filter="running" role="tab" aria-selected="false">Running <span class="tab-count" id="c-running">0</span></button>
           <button type="button" class="tab" data-filter="queued" role="tab" aria-selected="false">Queued <span class="tab-count" id="c-queued">0</span></button>
           <button type="button" class="tab" data-filter="success" role="tab" aria-selected="false">Success <span class="tab-count" id="c-success">0</span></button>
-          <button type="button" class="tab" data-filter="fail" role="tab" aria-selected="false">Failed <span class="tab-count" id="c-fail">0</span></button>
+          <button type="button" class="tab" data-filter="fail" role="tab" aria-selected="false">Lỗi <span class="tab-count" id="c-fail">0</span></button>
           <button type="button" class="tab" data-filter="stopped" role="tab" aria-selected="false">Stopped <span class="tab-count" id="c-stopped">0</span></button>
         </div>
+        <div class="queue-tools">
+        <label class="task-search-field">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>
+          <input id="task-search" type="search" placeholder="Search email or task ID…" aria-label="Search tasks by email or ID" autocomplete="off">
+        </label>
         <div class="view-toggle" role="group" aria-label="Success result layout">
           <button type="button" class="view-option active" data-view="list" aria-label="List view" aria-pressed="true" title="List">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>
@@ -222,44 +252,30 @@
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>
           </button>
         </div>
+        </div>
       </div>
 
       <div class="empty-state" id="empty-state">
-        <svg width="128" height="128" viewBox="0 0 128 128" fill="none" aria-hidden="true">
-          <g fill="#26332e">
-            <rect x="10" y="10" width="36" height="36" rx="4"/>
-            <rect x="82" y="10" width="36" height="36" rx="4"/>
-            <rect x="10" y="82" width="36" height="36" rx="4"/>
-          </g>
-          <g fill="#151918">
-            <rect x="18" y="18" width="20" height="20" rx="3"/>
-            <rect x="90" y="18" width="20" height="20" rx="3"/>
-            <rect x="18" y="90" width="20" height="20" rx="3"/>
-          </g>
-          <g fill="#48d5a0">
-            <rect x="27" y="27" width="4" height="4"/>
-            <rect x="99" y="27" width="4" height="4"/>
-            <rect x="27" y="99" width="4" height="4"/>
-          </g>
-          <g fill="#26332e">
-            <rect x="52" y="12" width="6" height="6"/><rect x="62" y="12" width="6" height="6"/><rect x="72" y="12" width="6" height="6"/>
-            <rect x="12" y="52" width="6" height="6"/><rect x="12" y="62" width="6" height="6"/><rect x="12" y="72" width="6" height="6"/>
-            <rect x="52" y="52" width="6" height="6"/><rect x="62" y="52" width="6" height="6"/><rect x="72" y="62" width="6" height="6"/>
-            <rect x="52" y="72" width="6" height="6"/><rect x="62" y="72" width="6" height="6"/>
-            <rect x="88" y="52" width="6" height="6"/><rect x="88" y="62" width="6" height="6"/><rect x="108" y="52" width="6" height="6"/><rect x="108" y="62" width="6" height="6"/>
-            <rect x="52" y="88" width="6" height="6"/><rect x="62" y="88" width="6" height="6"/><rect x="72" y="88" width="6" height="6"/>
-            <rect x="52" y="108" width="6" height="6"/><rect x="62" y="108" width="6" height="6"/>
-            <rect x="88" y="88" width="6" height="6"/><rect x="98" y="88" width="6" height="6"/><rect x="108" y="88" width="6" height="6"/>
-          </g>
-        </svg>
+        <div class="empty-copy">
         <span class="section-eyebrow">READY WHEN YOU ARE</span>
         <h2>Your next batch starts here</h2>
         <p>Add access tokens in Batch setup, then start a run. Task progress and payment results will appear here.</p>
         <a class="empty-action" href="#tokens">Add access tokens <span aria-hidden="true">↗</span></a>
+        <div class="empty-steps" aria-label="Three steps to start"><span><b>01</b> Add tokens</span><span><b>02</b> Pick workers</span><span><b>03</b> Run tasks</span></div>
+        </div>
+        <svg class="empty-illustration" width="270" height="180" viewBox="0 0 270 180" fill="none" aria-hidden="true">
+          <path d="M76 90h32m28-48h29m-29 48h29m-29 48h29M108 42v96m0-96h28m-28 48h28m-28 48h28" stroke="currentColor" stroke-width="1.5" stroke-dasharray="4 5"/>
+          <rect x="12" y="64" width="64" height="52" rx="12" fill="var(--surface)" stroke="var(--border-strong)"/>
+          <path d="M31 82h25M31 90h25M31 98h16" stroke="var(--primary)" stroke-width="2.5" stroke-linecap="round"/>
+          <g fill="var(--surface)" stroke="var(--border-strong)"><rect x="165" y="22" width="90" height="40" rx="8"/><rect x="165" y="70" width="90" height="40" rx="8"/><rect x="165" y="118" width="90" height="40" rx="8"/></g>
+          <g fill="var(--primary-soft)"><rect x="176" y="33" width="18" height="18" rx="5"/><rect x="176" y="81" width="18" height="18" rx="5"/><rect x="176" y="129" width="18" height="18" rx="5"/></g>
+          <path d="m181 42 3 3 5-6m-8 51 3 3 5-6m-8 51 3 3 5-6" stroke="var(--primary)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M203 39h36m-36 6h24m-24 42h36m-36 6h24m-24 42h36m-36 6h24" stroke="var(--border-strong)" stroke-width="3" stroke-linecap="round"/>
+        </svg>
       </div>
       <div class="list-empty" id="list-empty" hidden></div>
       <div class="queue-loading" id="queue-loading" hidden>
-        <div class="queue-loading-text" id="queue-loading-text">Filling queue…</div>
+        <div class="queue-loading-text" id="queue-loading-text">Loading queue…</div>
         <div class="queue-loading-bar"><div class="queue-loading-fill" id="queue-loading-fill"></div></div>
       </div>
       <div class="task-list" id="task-list"></div>
@@ -281,7 +297,7 @@
       <p class="modal-text" id="modal-text"></p>
       <div class="modal-actions">
         <button type="button" class="btn-ghost" id="modal-cancel">Cancel</button>
-        <button type="button" class="btn-modal-ok" id="modal-ok">Delete</button>
+        <button type="button" class="btn-modal-ok" id="modal-ok">Remove</button>
       </div>
     </div>
   </div>

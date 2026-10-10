@@ -18,7 +18,16 @@ const state = {
   starting: false, // đang POST /api/run (kể cả lúc server quét/lọc proxy) — chưa có job
   startingAt: 0,
   filter: 'all', // tab đang chọn: all | running | queued | success | fail
+  search: '',
+  workers: 0,
+  elapsedMs: 0,
+  elapsedAt: 0,
+  jobStatus: '',
+  connecting: false,
+  streamRevision: 0,
+  counts: null,
   tokens: [], // token order for matching each task result to its account
+  tokensJobId: null, // only associate tokens with the job created from them in this tab
   es: null, // active EventSource, if any
 };
 
@@ -26,9 +35,9 @@ const state = {
 const tasks = new Map();
 
 const MODE_HINTS = {
-  auto: 'Detect each account\'s provider, then run the matching flow.',
-  oaics: 'confirmation_tokens → checkout/confirm → intent confirm.',
-  cs: 'payment_pages + approve (extract_cs).',
+  auto: 'Detects the provider and picks the right flow for each account.',
+  oaics: 'Luồng OAICS: confirmation_tokens → checkout/confirm → intent confirm.',
+  cs: 'Luồng CS: payment_pages + approve (extract_cs).',
 };
 
 // Backend gửi 2 loại status khác nhau:
@@ -38,7 +47,7 @@ const MODE_HINTS = {
 // CHỈ 'LINK' là thành công (có link/QR để quét). Mọi raw status khác đều là thất bại.
 // Trần token mỗi batch — phải khớp MAX_TOKENS_PER_BATCH bên web/engine.py.
 const MAX_TOKENS = 1000;
-// Trần worker — phải khớp `le=100` trong web/app.py (server là nơi phán cuối).
+// Trần worker — phải khớp validation trong web/app.py (server là nơi phán cuối).
 const MAX_WORKERS = 200;
 
 // Số nhiều tiếng Anh: 1 task / 2 tasks. Dùng cho mọi chuỗi có đếm.
@@ -125,6 +134,13 @@ const els = {
   historyCount: document.getElementById('history-count'),
   emptyState: document.getElementById('empty-state'),
   taskList: document.getElementById('task-list'),
+  taskSearch: document.getElementById('task-search'),
+  runtimeRunning: document.getElementById('runtime-running'),
+  runtimeQueued: document.getElementById('runtime-queued'),
+  runtimeWorkers: document.getElementById('runtime-workers'),
+  runtimeElapsed: document.getElementById('runtime-elapsed'),
+  runtimeThroughput: document.getElementById('runtime-throughput'),
+  runtimeStatus: document.getElementById('runtime-status'),
   toasts: document.getElementById('toasts'),
 };
 
@@ -179,6 +195,11 @@ function newTask(taskId) {
     run: 1,
     egress: null,           // {ip, location, probed_at}
     artifact: null,         // {upi_link, qr_png, qr_svg, amount_minor, intent}
+    // Acc đã lên Plus chưa. Server chỉ bắt đầu dò khi khách DUYỆT MANDATE
+    // (link_state = succeeded), rồi dò lại vài lần vì khách còn phải trả tiền.
+    plusState: '',          // '' | checking | plus | not_plus
+    plusNote: '',           // chi tiết thô: "AT 401 · promo active"
+    plusCheckedAt: 0,
     doneAt: 0,              // epoch lúc task xong (server gửi) -> sắp tab Success
     created_at: null,
     updated_at: null,
@@ -239,11 +260,11 @@ async function clearTab(scope, btn) {
   const label = (QUEUE_FILTERS.find(f => f.key === scope) || {}).label || scope;
   const c = countByStatus();
   const n = scope === 'all' ? tasks.size : (c[scope] || 0);
-  if (!n) { toast('Tab ' + label + ' is empty'); return; }
+  if (!n) { toast('"' + label + '" is empty'); return; }
   const okClear = await confirmDialog({
-    title: 'Delete ' + n + ' task' + plural(n) + ' from "' + label + '"?',
-    text: 'Also deletes the server copy.\nThis cannot be undone.',
-    okLabel: 'Delete ' + n + ' task' + plural(n),
+    title: 'Remove ' + n + ' tasks from "' + label + '"?',
+    text: 'The server copy is deleted too.\nThis cannot be undone.',
+    okLabel: 'Remove ' + n + ' tasks',
   });
   if (!okClear) return;
 
@@ -256,7 +277,7 @@ async function clearTab(scope, btn) {
         body: JSON.stringify({ scope }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) { toast(data.detail || 'Delete failed'); return; }
+      if (!res.ok) { toast(data.detail || 'Could not remove'); return; }
     }
     // 服务端删完再删本地，避免中间态
     for (const [tid, t] of [...tasks.entries()]) {
@@ -271,9 +292,9 @@ async function clearTab(scope, btn) {
       }
     }
     updateCounters();
-    toast('Deleted ' + n + ' task' + plural(n) + ' from ' + label);
+    toast('Removed ' + n + ' tasks from "' + label + '"');
   } catch (err) {
-    toast('Delete error: ' + err.message);
+    toast('Remove failed: ' + err.message);
   } finally {
     if (btn) btn.classList.remove('busy');
   }
@@ -285,24 +306,24 @@ function rowStatusText(t) {
   // 现在 engine 会真的 kill 掉子进程，通常 1~2 秒内这些行就会翻成 Fail。
   if (state.stopping) {
     if (t.status === 'running') return '⏹ Cancelling…';
-    if (t.status === 'pending') return '⏹ Will be cancelled';
+    if (t.status === 'pending') return '⏹ Waiting to cancel';
   }
   if (t.status === 'stopped') {
     // Phân biệt rõ: bị kill giữa chừng (token đã dùng một phần) vs chưa hề chạy
     // (token còn nguyên, chạy lại được) — trước đây cả hai đều ghi "Fail".
     const raw = String(t.rawStatus || '').toUpperCase();
     return raw === 'STOPPED'
-      ? 'Stopped mid-run — token may be partially used'
+      ? 'Stopped mid-run — the token may be partially used'
       : 'Never ran — job stopped before its turn (token intact)';
   }
   if (t.status === 'success') return 'QR link created';
-  if (t.status === 'fail') return 'Fail: ' + failReason(t);
+  if (t.status === 'fail') return 'Lỗi: ' + failReason(t);
   if (t.status === 'running') return 'Running…';
   // Vị trí trong queue = số thứ tự dòng token, để biết task này là token thứ mấy
   // trong 100 dòng đã dán (trước đây chỉ ghi "Chờ xử lý", không biết đang ở đâu).
   const total = state.total || tasks.size;
   if (total > 0 && t.index != null) return 'Queued · ' + (t.index + 1) + '/' + total;
-  return 'Waiting';
+  return 'Queued';
 }
 
 // Chip nói kết quả **thật** của link, không phải "máy đã trích xuất xong".
@@ -330,13 +351,13 @@ function chipFor(t) {
   if (t.status === 'running') return ['Running', 'chip-blue'];
   if (t.status === 'stopped') return ['Stopped', 'chip-gray'];
   if (t.status === 'fail') return ['Failed', 'chip-red'];
-  if (t.status !== 'success') return ['Waiting', 'chip-gray'];
+  if (t.status !== 'success') return ['Queued', 'chip-gray'];
   const p = t.probe || {};
   const st = effStatus(t, p);
   if (!p.ok && !st) return ['Awaiting payment', 'chip-amber'];   // chưa dò được -> vẫn coi là chưa xong
   const byProbe = {
     succeeded: ['Customer approved', 'chip-green'],
-    failed: ['Stripe declined', 'chip-red'],
+    failed: ['Stripe từ chối', 'chip-red'],
     canceled: ['Cancelled', 'chip-red'],
     expired: ['Expired', 'chip-amber'],
     waiting: ['Awaiting payment', 'chip-amber'],
@@ -465,6 +486,43 @@ function artifactHtml(t) {
 
 /* --------------------------- rendering ----------------------------- */
 
+// Apply events to the model immediately, then paint each changed row once.
+// A short timer also works in background tabs where animation frames pause.
+const dirtyTasks = new Set();
+let renderTimer = null;
+let countersDirty = false;
+let orderDirty = false;
+
+function scheduleRender() {
+  if (renderTimer === null) renderTimer = setTimeout(flushRender, 32);
+}
+
+function queueTaskRender(t, countersChanged = false, orderChanged = false) {
+  dirtyTasks.add(t.task_id);
+  countersDirty = countersDirty || countersChanged;
+  orderDirty = orderDirty || orderChanged;
+  scheduleRender();
+}
+
+function flushRender() {
+  if (renderTimer !== null) clearTimeout(renderTimer);
+  renderTimer = null;
+  const fragment = document.createDocumentFragment();
+  for (const id of dirtyTasks) {
+    const t = tasks.get(id);
+    if (!t) continue;
+    if (!t.el) fragment.appendChild(createTaskEl(t).wrap);
+    renderRow(t);
+    renderDetailIfOpen(t);
+  }
+  dirtyTasks.clear();
+  if (fragment.children.length) els.taskList.appendChild(fragment);
+  if (countersDirty) {
+    countersDirty = false;
+    renderCounters();
+  }
+}
+
 // Build a task's row + detail container once and cache the row refs.
 // Icon copy (dùng cho 2 nút ở chế độ lưới). Inline SVG cho khớp style các nút khác.
 const CARD_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true">'
@@ -519,6 +577,9 @@ function createTaskEl(t) {
           '<button type="button" class="success-open" title="Open in a new tab">Open ↗</button>' +
         '</span></div>' +
       '<div class="success-field success-amount-field" hidden><span class="success-label">Amount</span><strong class="success-amount"></strong><span class="success-expiry"></span><span class="success-verdict"></span></div>' +
+      // Kết luận acc đã lên Plus chưa — chỉ hiện khi server đã bắt đầu dò (tức khách
+      // đã duyệt mandate). Kết luận lấy từ chính AT của acc (xem at_check.py).
+      '<div class="success-field success-plus-field" hidden><span class="success-label">Upgrade</span><strong class="success-plus"></strong></div>' +
       // Link Stripe (return_url của session) — hiện NGAY DƯỚI link UPI, chiếm cả
       // 2 cột. Dùng lại class .success-link/.success-open nên bấm-copy và
       // bấm-đúp-mở hoạt động sẵn, không cần handler mới.
@@ -577,6 +638,8 @@ function createTaskEl(t) {
     successAmount: successResult.querySelector('.success-amount'),
     successExpiry: successResult.querySelector('.success-expiry'),
     successVerdict: successResult.querySelector('.success-verdict'),
+    successPlusField: successResult.querySelector('.success-plus-field'),
+    successPlus: successResult.querySelector('.success-plus'),
     successCardStatus: successResult.querySelector('.success-card-status'),
     successStripeField: successResult.querySelector('.success-stripe-field'),
     successStripe: successResult.querySelector('.success-stripe'),
@@ -749,7 +812,7 @@ function applyProbe(t, probe) {
   }
 
   setChip(t);   // probe về mới biết link sống/chết -> đổi màu chip theo kết quả đó
-  tickExpiry();
+  tickExpiry(e.successExpiry);
 }
 
 // Trước đây khoá cache là `url + '#fresh'` và KHÔNG bao giờ bị xoá -> gọi
@@ -761,44 +824,79 @@ function applyProbe(t, probe) {
 async function probeArtifact(t, fresh) {
   const url = (t.artifact || {}).upi_link || '';
   if (!/^https:\/\/payments\.stripe\.com\/upi\/instructions\//.test(url)) return null;
+  if (t._probePending && t._probeUrl === url) return t._probePending;
   let entry;
-  if (fresh) {
-    entry = fetch('/api/artifact?url=' + encodeURIComponent(url) + '&fresh=1')
-      .then((res) => res.json())
-      .catch(() => ({ ok: false, error: 'request failed' }));
-  } else {
-    entry = _probeCache.get(url);
-    if (!entry) {
-      entry = fetch('/api/artifact?url=' + encodeURIComponent(url))
-        .then((res) => res.json())
-        .catch(() => ({ ok: false, error: 'request failed' }));
-      _probeCache.set(url, entry);
-    }
+  if (!fresh) entry = _probeCache.get(url);
+  if (!entry) {
+    entry = requestProbe(url, fresh);
+    if (!fresh) _probeCache.set(url, entry);
   }
-  const probe = await entry;
-  // 结果落回**当前** Map 里的对象 —— 传进来那个可能已被 applySnapshot 换掉
-  const live = tasks.get(t.task_id) || t;
-  live.probe = probe;
-  applyProbe(live, probe);
-  return probe;
+  t._probeUrl = url;
+  const pending = entry.then(probe => {
+    // A removed task, switched job, or retried artifact must not receive an old response.
+    if (probe && tasks.get(t.task_id) === t && (t.artifact || {}).upi_link === url) {
+      t.probe = probe;
+      applyProbe(t, probe);
+    }
+    return probe;
+  }).finally(() => {
+    if (t._probePending === pending) t._probePending = null;
+  });
+  t._probePending = pending;
+  return pending;
+}
+
+// Bound the browser safety-net as well as deduplicating requests for the same URL.
+// A fresh read skips the completed cache, but can share an already in-flight read.
+const _probeInFlight = new Map();
+const _probeQueue = [];
+let _activeProbes = 0;
+const PROBE_CONCURRENCY = 6;
+
+function requestProbe(url, fresh) {
+  if (_probeInFlight.has(url)) return _probeInFlight.get(url);
+  const entry = new Promise(resolve => {
+    _probeQueue.push({ url, fresh, resolve });
+  }).finally(() => {
+    if (_probeInFlight.get(url) === entry) _probeInFlight.delete(url);
+  });
+  _probeInFlight.set(url, entry);
+  drainProbes();
+  return entry;
+}
+
+function drainProbes() {
+  while (_activeProbes < PROBE_CONCURRENCY && _probeQueue.length) {
+    const request = _probeQueue.shift();
+    _activeProbes++;
+    fetch('/api/artifact?url=' + encodeURIComponent(request.url) + (request.fresh ? '&fresh=1' : ''))
+      .then(res => res.json())
+      .catch(() => ({ ok: false, error: 'request failed' }))
+      .then(request.resolve)
+      .finally(() => { _activeProbes--; drainProbes(); });
+  }
 }
 
 // 每 20 秒回访一次：过期 / 取消 / 成功都要及时看到。
 // 到了终态就停 —— 已经成功或已取消的链再问也没意义。
 function startMonitor(t) {
-  const st = (t.probe || {}).status;
+  const st = effStatus(t);
   // 一开始就落在终态就别启 —— 否则要等第一个 tick 才自己关掉
-  if (TERMINAL.includes(st)) return;
+  if (TERMINAL.includes(st)) {
+    if (t._monitor) clearInterval(t._monitor);
+    t._monitor = null;
+    return;
+  }
   if (t._monitor) return;
   // Việc dò chính giờ do SERVER làm nền và đẩy xuống qua event `task_link`
   // (engine._link_monitor_loop). Ở đây chỉ giữ một lưới an toàn chậm, phòng khi
   // vòng nền bị tắt (UPI_MONITOR_SECS=0) — không còn là cơ chế chính, nên để thưa
   // hẳn: trước đây mỗi card tự hỏi mỗi 20s, 500 card là 25 request/giây từ một tab.
   t._monitor = setInterval(async () => {
-    const live = tasks.get(t.task_id) || t;
-    if (TERMINAL.includes((live.probe || {}).status)) {
-      clearInterval(live._monitor);
-      live._monitor = null;
+    const live = tasks.get(t.task_id);
+    if (live !== t || TERMINAL.includes(effStatus(t))) {
+      clearInterval(t._monitor);
+      t._monitor = null;
       return;
     }
     await probeArtifact(live, true);
@@ -807,13 +905,17 @@ function startMonitor(t) {
 
 async function refreshArtifactNow(t) {
   const probe = await probeArtifact(t, true);
-  if (probe && probe.ok) startMonitor(tasks.get(t.task_id) || t);
+  if (probe && probe.ok && tasks.get(t.task_id) === t) startMonitor(t);
   return probe;
 }
 
-function tickExpiry() {
+function tickExpiry(target) {
+  if (document.hidden) return;
   const now = Math.floor(Date.now() / 1000);
-  document.querySelectorAll('.success-expiry[data-expires]').forEach((el) => {
+  const elements = target ? [target]
+    : document.querySelectorAll('.task:not([hidden]) .success-expiry[data-expires]:not([hidden])');
+  elements.forEach((el) => {
+    if (el.hidden) return;
     const exp = parseInt(el.dataset.expires, 10) || 0;
     if (!exp) { el.textContent = ''; return; }
     const left = exp - now;
@@ -884,7 +986,7 @@ function confirmDialog(opts) {
     _modalResolve = resolve;
     els.modalTitle.textContent = o.title || 'Confirm';
     els.modalText.textContent = o.text || '';
-    els.modalOk.textContent = o.okLabel || 'Delete';
+    els.modalOk.textContent = o.okLabel || 'Remove';
     els.modalOk.classList.toggle('safe', o.danger === false);
     els.modal.hidden = false;
     els.modalOk.focus();
@@ -1063,6 +1165,13 @@ function renderRow(t) {
   // dễ lệch nhau — tab "Đã dừng" vừa thêm là ví dụ.
   setChip(t);
 
+  t.el.successResult.hidden = t.status !== 'success';
+  if (t.status !== 'success') {
+    if (t._monitor) clearInterval(t._monitor);
+    t._monitor = null;
+    return;
+  }
+
   const a = t.artifact || {};
   t.el.successEmail.textContent = t.email || '—';
   // AT 是 1~2 KB 的 JWT，铺满整格既挤又难读。只显示首尾各一小段，
@@ -1071,7 +1180,7 @@ function renderRow(t) {
   t.el.successToken.textContent = token ? maskToken(token) : '—';
   t.el.successToken.title = token
     ? 'Click "Copy AT" for the full token (' + token.length + ' chars)'
-    : '';
+    : 'No confirmed token for this task in the current session';
   if (t.el.cardCopyAt) {
     t.el.cardCopyAt.dataset.token = token;
     t.el.cardCopyAt.disabled = !token;
@@ -1114,6 +1223,26 @@ function renderRow(t) {
   } else {    t.el.successQr.removeAttribute('src');
   }
   t.el.successResult.hidden = t.status !== 'success';
+  renderPlus(t);
+}
+
+/* Kết luận acc đã lên Plus chưa (server dò bằng chính AT của acc — at_check.py).
+   Chỉ có ý nghĩa SAU khi khách duyệt mandate nên server chỉ gửi plus_state từ lúc
+   đó; chưa có thì ẩn ô này thay vì hiện "chưa lên" gây hiểu nhầm. */
+function renderPlus(t) {
+  const e = t.el;
+  if (!e || !e.successPlusField) return;
+  const state = t.plusState || '';
+  e.successPlusField.hidden = !state;
+  if (!state) return;
+  e.successPlus.textContent = state === 'plus' ? 'Plus ✓'
+    : state === 'checking' ? 'Checking AT…'
+    : 'Not Plus';
+  e.successPlus.className = 'success-plus is-' + state;
+  const when = t.plusCheckedAt
+    ? ' · checked ' + new Date(t.plusCheckedAt * 1000).toLocaleTimeString()
+    : '';
+  e.successPlus.title = (t.plusNote || 'AT / promo not readable') + when;
 }
 
 // Dòng IP hiện sẵn trên mỗi row: exit + billing (không cần click).
@@ -1204,7 +1333,13 @@ function countByStatus() {
 }
 
 function updateCounters() {
+  countersDirty = true;
+  scheduleRender();
+}
+
+function renderCounters() {
   const c = countByStatus();
+  state.counts = c;
 
   const total = state.total || tasks.size || 0;
   const pct = total ? Math.round(((c.success + c.fail) / total) * 100) : 0;
@@ -1224,12 +1359,14 @@ function updateCounters() {
   applyFilter();
   updateEmptyState();
   updateQueueLoading();
+  updateRuntimeMetrics();
 
   // Nút "Dọn dẹp" nói rõ nó sắp xoá tab nào và bao nhiêu task — nút ✕ nhỏ trên tab
   // trước đây khó thấy, user phải đi xoá từng card một.
   // Nút copy email: đếm theo SỐ ACC ĐÃ QUÉT THÀNH CÔNG (không phải theo tab đang chọn)
   if (els.btnCopyEmailsLabel) {
-    const nOk = approvedEmails().length;
+    let nOk = 0;
+    for (const t of tasks.values()) if (t.linkState === 'succeeded' && t.email) nOk++;
     els.btnCopyEmailsLabel.textContent = 'Copy emails' + (nOk ? ' (' + nOk + ')' : '');
     els.btnCopyEmails.disabled = nOk === 0;
   }
@@ -1238,6 +1375,26 @@ function updateCounters() {
     const n = state.filter === 'all' ? tasks.size : (c[state.filter] || 0);
     els.btnClearTabLabel.textContent = 'Clear "' + label + '"' + (n ? ' (' + n + ')' : '');
     els.btnClearTab.disabled = n === 0;
+  }
+}
+
+function updateRuntimeMetrics() {
+  const c = state.counts || {};
+  const elapsed = state.elapsedMs + (state.running && state.elapsedAt ? Date.now() - state.elapsedAt : 0);
+  if (els.runtimeRunning) els.runtimeRunning.textContent = String(c.running || 0);
+  if (els.runtimeQueued) els.runtimeQueued.textContent = String(c.queued || 0);
+  if (els.runtimeWorkers) els.runtimeWorkers.textContent = String(state.workers || readWorkers().value);
+  if (els.runtimeElapsed) els.runtimeElapsed.textContent = fmtElapsed(Math.floor(Math.max(0, elapsed) / 1000));
+  if (els.runtimeThroughput) {
+    const done = (c.success || 0) + (c.fail || 0);
+    els.runtimeThroughput.textContent = (elapsed > 0 ? (done * 60000 / elapsed).toFixed(1) : '0.0') + ' / min';
+  }
+  if (els.runtimeStatus) {
+    const kind = state.starting || (state.connecting && state.running) ? 'connecting'
+      : state.stopping ? 'stopping' : state.running ? 'running' : state.jobId ? 'done' : 'idle';
+    const labels = { connecting: 'Connecting', stopping: 'Stopping', running: 'Running', done: 'Done', idle: 'Ready' };
+    els.runtimeStatus.dataset.state = kind;
+    els.runtimeStatus.textContent = state.jobStatus === 'stopped' && kind === 'done' ? 'Stopped' : labels[kind];
   }
 }
 
@@ -1270,7 +1427,7 @@ function updateQueueLoading() {
   const show = state.running && total > 0 && loaded < total;
   el.hidden = !show;
   if (!show) return;
-  els.queueLoadingText.textContent = 'Filling queue… ' + loaded + '/' + total;
+  els.queueLoadingText.textContent = 'Loading queue… ' + loaded + '/' + total;
   els.queueLoadingFill.style.width = Math.round((loaded / total) * 100) + '%';
 }
 
@@ -1280,7 +1437,10 @@ function fmtElapsed(secs) {
 }
 
 // Mỗi giây cập nhật lại banner "đang chuẩn bị" (đồng hồ chạy) cho tới khi có job.
-setInterval(() => { if (state.starting) updateQueueLoading(); }, 1000);
+setInterval(() => {
+  if (state.starting) updateQueueLoading();
+  if (!document.hidden) updateRuntimeMetrics();
+}, 1000);
 
 // An/hien tung hang theo tab dang chon. Chi doi hidden, khong render lai.
 // Ten tab (bucket) khac ten status cua task: tab 'queued' ung voi task.status 'pending'.
@@ -1293,8 +1453,8 @@ const FILTER_TO_STATUS = {
 };
 
 function taskMatchesFilter(t) {
-  if (state.filter === 'all') return true;
-  return t.status === FILTER_TO_STATUS[state.filter];
+  if (state.filter !== 'all' && t.status !== FILTER_TO_STATUS[state.filter]) return false;
+  return !state.search || (t.email + ' ' + t.task_id).toLowerCase().includes(state.search);
 }
 
 // Thứ tự row trong #task-list.
@@ -1327,19 +1487,22 @@ function orderRows() {
 }
 
 function applyFilter() {
-  orderRows();
+  if (orderDirty) {
+    orderRows();
+    orderDirty = false;
+  }
   let visible = 0;
   for (const t of tasks.values()) {
     const show = taskMatchesFilter(t);
     if (show) visible++;
     if (!t.el || !t.el.wrap) continue;
-    t.el.wrap.hidden = !show;
+    if (t.el.wrap.hidden === show) t.el.wrap.hidden = !show;
   }
   renumber();
   els.listEmpty.hidden = !(tasks.size > 0 && visible === 0);
   if (els.listEmpty) {
     const label = (QUEUE_FILTERS.find(f => f.key === state.filter) || {}).label || '';
-    els.listEmpty.textContent = 'No tasks in "' + label + '".';
+    els.listEmpty.textContent = state.search ? 'No matching tasks in "' + label + '".' : 'No tasks in "' + label + '".';
   }
 }
 
@@ -1367,6 +1530,7 @@ function renumber() {
 }
 
 function setFilter(key) {
+  orderDirty = true;
   state.filter = key;
   document.body.dataset.filter = key;
   document.querySelectorAll('.tab').forEach(b => {
@@ -1458,7 +1622,7 @@ function renderJobHistory(jobs) {
       + '<span class="history-when">' + esc(fmtJobTime(j.started_at)) + '</span>'
       + '<span class="history-id mono">' + esc(j.job_id) + '</span>'
       + '<span class="history-stat">' + stat.join(' · ') + '</span>'
-      + '<span class="history-status is-' + st + '">' + st + '</span>'
+      + '<span class="history-status is-' + st + '">' + ({ running: 'Running', done: 'Done', stopped: 'Stopped' }[st]) + '</span>'
       + '</button>';
   }).join('');
   markCurrentJob();
@@ -1468,7 +1632,7 @@ function renderJobHistory(jobs) {
 function setStopNote(reason) {
   if (!els.stopNote) return;
   els.stopNote.hidden = !reason;
-  els.stopNote.textContent = reason ? '⏹ Stopped early — ' + reason : '';
+  els.stopNote.textContent = reason ? '⏹ Stopped before finishing — ' + reason : '';
 }
 
 // Đánh dấu dòng của job đang mở. Gọi lại mỗi lần đổi job (không fetch lại).
@@ -1498,9 +1662,7 @@ async function loadJobById(raw) {
     toast('Connection lost loading job ' + id);
     return;
   }
-  closeES();
-  detachMonitors();
-  attachJob(id);
+  attachJob(id, data);
   toast('Viewing job ' + id + ' · ' + (data.tasks || []).length + ' task'
         + (data.status ? ' · ' + data.status : ''));
 }
@@ -1510,6 +1672,9 @@ function detachMonitors() {
   for (const t of tasks.values()) {
     if (t._monitor) { clearInterval(t._monitor); t._monitor = null; }
   }
+  for (const request of _probeQueue.splice(0)) request.resolve(null);
+  _probeCache.clear();
+  _probeInFlight.clear();
 }
 
 function getTokens() {
@@ -1535,12 +1700,12 @@ function readWorkers() {
 
 function updateTokenCount() {
   const n = getTokens().length;
-  els.tokenCount.textContent = n + ' token' + plural(n) + ' detected';
-  els.summaryTasks.textContent = n + ' task' + plural(n) + ' × 1 use each';
+  els.tokenCount.textContent = 'Received ' + n + ' tokens';
+  els.summaryTasks.textContent = n + ' tasks × 1 use';
   els.summaryTotal.textContent = 'Total uses: ' + n;
   // Chỉ còn cảnh báo token (đã bỏ cảnh báo RAM theo yêu cầu). Khi bị kẹp trần worker
   // thì toast ở runJob vẫn báo "Capped at N — you asked for M".
-  const warn = n > 0 ? n + ' token' + plural(n) + ' ready. Tasks over quota may fail.' : '';
+  const warn = n > 0 ? n + ' tokens ready. Tasks over quota may fail.' : '';
   els.warning.hidden = !warn;
   els.warning.textContent = warn;
   setSubmitState();
@@ -1554,7 +1719,7 @@ function setSubmitState() {
   if (state.starting) {
     // POST /api/run còn treo vì server đang quét/lọc pool proxy — lúc này chưa có
     // job để "dừng", nên bấm nút chỉ gây lỗi; hiện trạng thái bận cho rõ.
-    els.submit.textContent = 'Preparing job…';
+    els.submit.textContent = 'Preparing…';
     els.submit.classList.remove('danger');
     els.submit.disabled = true;
   } else if (state.stopping) {
@@ -1564,11 +1729,11 @@ function setSubmitState() {
     els.submit.classList.add('danger');
     els.submit.disabled = false;
   } else if (state.running) {
-    els.submit.textContent = 'Stop job' + jidTag;
+    els.submit.textContent = 'Dừng job' + jidTag;
     els.submit.classList.add('danger');
     els.submit.disabled = false;
   } else {
-    els.submit.textContent = 'Run ' + n + ' checkout task' + plural(n);
+    els.submit.textContent = 'Run ' + n + ' tasks';
     els.submit.classList.remove('danger');
     els.submit.disabled = n === 0;
   }
@@ -1611,8 +1776,7 @@ function ensureTask(taskId) {
   if (!t) {
     t = newTask(taskId);
     tasks.set(taskId, t);
-    t.el = createTaskEl(t);
-    els.taskList.appendChild(t.el.wrap);
+    queueTaskRender(t, true, true);
   }
   return t;
 }
@@ -1627,6 +1791,7 @@ function handleEvent(evt) {
     case 'egress': onEgress(evt); break;
     case 'task_artifact': onArtifact(evt); break;
     case 'task_link': onTaskLink(evt); break;
+    case 'task_plus': onTaskPlus(evt); break;
     case 'task_done': onTaskDone(evt); break;
     case 'job_done': onJobDone(evt); break;
     case 'job_stopping': onJobStopping(evt); break;
@@ -1634,7 +1799,10 @@ function handleEvent(evt) {
     case 'state': applySnapshot(evt.job || {}); break;
     case 'proxy_quality': onProxyQuality(evt); break;
     case 'task_start': onTaskStart(evt); break;
-    case 'job_progress': updateCounters(); break;
+    case 'job_progress':
+      if (evt.total != null) state.total = evt.total;
+      updateCounters();
+      break;
   }
 }
 
@@ -1644,6 +1812,10 @@ function onJobStart(evt) {
   state.mode = evt.mode || 'auto';
   state.running = true;
   state.stopping = false;
+  state.jobStatus = 'running';
+  state.workers = evt.workers || state.workers;
+  state.elapsedMs = evt.elapsed_ms || 0;
+  state.elapsedAt = Date.now();
   setJobBadge(state.jobId);
   setSubmitState();
 }
@@ -1651,6 +1823,9 @@ function onJobStart(evt) {
 function onJobStopping() {
   state.running = true;
   state.stopping = true;
+  for (const t of tasks.values()) {
+    if (t.status === 'running' || t.status === 'pending') queueTaskRender(t);
+  }
   setSubmitState();
 }
 
@@ -1658,22 +1833,23 @@ function onTaskStart(evt) {
   const t = ensureTask(evt.task_id);
   t.status = 'running';
   if (evt.run != null) t.run = evt.run;
-  renderRow(t);
-  renderDetailIfOpen(t);
-  updateCounters();
+  queueTaskRender(t, true);
 }
 
 function onTaskInit(evt) {
   const t = ensureTask(evt.task_id);
   if (evt.index != null) t.index = evt.index;
-  t.token = state.tokens[t.index] || '';
+  t.token = state.tokensJobId === state.jobId ? state.tokens[t.index] || '' : '';
   if (evt.email != null) t.email = evt.email;
   if (Object.prototype.hasOwnProperty.call(evt, 'flow')) t.flow = evt.flow || null;
   t.steps = (evt.steps || []).map(s => ({ key: s.key, label: s.label || s.key, status: 'pending', detail: '', err: '' }));
-  if (t.steps.length) t.status = 'pending';
-  renderRow(t);
-  renderDetailIfOpen(t);
-  updateCounters();
+  t.status = 'pending';
+  if (evt.run != null) t.run = evt.run;
+  t.rawStatus = t.error = t.duration_ms = t.artifact = t.egress = t.probe = null;
+  t.linkState = '';
+  t.doneAt = 0;
+  t.notified = false;
+  queueTaskRender(t, true, true);
 }
 
 function onTaskFlow(evt) {
@@ -1682,8 +1858,7 @@ function onTaskFlow(evt) {
   if (evt.flow_label != null) t.flow_label = evt.flow_label;
   // Flow became known: REPLACE the step list with the flow-specific steps.
   t.steps = (evt.steps || []).map(s => ({ key: s.key, label: s.label || s.key, status: 'pending', detail: '', err: '' }));
-  renderRow(t);
-  renderDetailIfOpen(t);
+  queueTaskRender(t);
 }
 
 function onStep(evt) {
@@ -1693,10 +1868,9 @@ function onStep(evt) {
   if (evt.status) s.status = evt.status;
   if (evt.detail != null) s.detail = evt.detail;
   if (evt.err != null) s.err = evt.err;
+  const statusChanged = evt.status === 'active' && t.status !== 'running';
   if (evt.status === 'active') t.status = 'running';
-  renderRow(t);
-  renderDetailIfOpen(t);
-  updateCounters();
+  queueTaskRender(t, statusChanged);
 }
 
 function onEgress(evt) {
@@ -1715,8 +1889,7 @@ function onEgress(evt) {
     ip: ex.ip || evt.ip || '',
     location: fmtGeo(ex) || evt.location || '',
   };
-  renderRow(t);
-  renderDetailIfOpen(t);
+  queueTaskRender(t);
 }
 
 function fmtGeo(g) {
@@ -1727,17 +1900,17 @@ function fmtGeo(g) {
 function onProxyQuality(evt) {
   // Chat luong pool proxy cua job: diem/risk/user_type cua con tot nhat, so con bi
   // loai, va so proxy sinh bu khi pool thieu (xem ippure.py + proxy_pool.py).
-  if (evt.error) { toast('Proxy quality: bỏ qua (' + evt.error + ')'); return; }
+  if (evt.error) { toast('Proxy quality: skipping (' + evt.error + ')'); return; }
   const b = evt.best || {};
   const g = evt.generated || {};
   const parts = [];
-  if (b.grade) parts.push(b.grade + ' ' + (b.score != null ? b.score + ' điểm' : ''));
+  if (b.grade) parts.push(b.grade + ' ' + (b.score != null ? b.score + ' pts' : ''));
   if (b.country) parts.push(b.country);
   if (b.risk != null) parts.push('risk ' + b.risk);
   if (b.user_type) parts.push(b.user_type);
   if (evt.scanned) parts.push('chấm ' + evt.scanned + ' proxy');
-  if (g.verified) parts.push('sinh bù ' + g.verified + ' proxy mới (' + g.sess_minutes + ' phút)');
-  else if (evt.excluded) parts.push('loại ' + evt.excluded);
+  if (g.verified) parts.push('replaced ' + g.verified + ' proxies (' + g.sess_minutes + ' min)');
+  else if (evt.excluded) parts.push('excluded ' + evt.excluded);
   if (parts.length) toast('Pool proxy: ' + parts.join(' · '));
 }
 
@@ -1750,12 +1923,11 @@ function onTaskLink(evt) {
   live.linkState = evt.link_state || '';
   live.linkFlipAt = evt.link_flip_at || 0;
   live.linkZero = !!evt.link_zero;
+  queueTaskRender(live, true);
   if (evt.probe && evt.probe.ok) {
     live.probe = evt.probe;
     // Render lại: link đổi trạng thái thì phần QR phải vẽ lại theo — uỷ nhiệm vừa
     // được duyệt là Stripe xoá ảnh QR (410 Gone) nên ảnh cũ thành icon vỡ.
-    renderRow(live);
-    applyProbe(live, evt.probe);
     const who = evt.link_state === 'succeeded' ? 'CUSTOMER SCANNED — mandate succeeded'
               : evt.link_state === 'failed' ? 'Link dead'
               : evt.link_state === 'expired' ? 'Link expired, never scanned'
@@ -1773,8 +1945,23 @@ function onTaskLink(evt) {
   }
 }
 
+function onTaskPlus(evt) {
+  const live = tasks.get(evt.task_id);
+  if (!live) return;
+  live.plusState = evt.plus_state || '';
+  live.plusNote = evt.plus_note || '';
+  live.plusCheckedAt = evt.plus_checked_at || 0;
+  queueTaskRender(live, true);
+  // Chỉ kêu khi có kết luận cuối: lúc này acc đã thực sự lên Plus.
+  if (evt.plus_state === 'plus') {
+    toast('⭐ ' + (live.email || evt.task_id) + ' — upgraded to Plus'
+          + (evt.plus_note ? ' (' + evt.plus_note + ')' : ''));
+  }
+}
+
 function onArtifact(evt) {
   const t = ensureTask(evt.task_id);
+  if ((t.artifact || {}).upi_link !== evt.upi_link) t.probe = null;
   t.artifact = {
     upi_link: evt.upi_link || null,
     qr_png: evt.qr_png || null,
@@ -1782,7 +1969,7 @@ function onArtifact(evt) {
     amount_minor: evt.amount_minor != null ? evt.amount_minor : null,
     intent: evt.intent || null,
   };
-  renderDetailIfOpen(t);
+  queueTaskRender(t);
 }
 
 function onTaskDone(evt) {
@@ -1795,30 +1982,31 @@ function onTaskDone(evt) {
   if (evt.updated_at) t.updated_at = evt.updated_at;
   // Mốc xong: dùng số của server; server cũ không gửi thì lấy giờ máy.
   t.doneAt = evt.done_at || Math.floor(Date.now() / 1000);
-  renderRow(t);
-  renderDetailIfOpen(t);
-  updateCounters();
+  queueTaskRender(t, true, state.filter === 'success');
   // Task vừa ra link QR -> kêu + báo tên account. Mắt không thể canh 1000 dòng.
   if (t.status === 'success' && !t.notified) {
     t.notified = true;
     playNotify();
-    toast('✅ ' + (t.email || t.task_id) + ' — QR link ready');
+    toast('✅ ' + (t.email || t.task_id) + ' — QR link created');
   }
 }
 
 function onJobDone(evt) {
+  state.elapsedMs = evt.duration_ms ?? (state.elapsedMs + (state.elapsedAt ? Date.now() - state.elapsedAt : 0));
+  state.elapsedAt = Date.now();
+  state.jobStatus = evt.status || 'done';
   state.running = false;
   state.stopping = false;
   state.jobId = evt.job_id || state.jobId;
   closeES();
   setSubmitState();
   toast(evt.status === 'stopped'
-    ? 'Job stopped · ' + (evt.done ?? 0) + '/' + (evt.total ?? 0) + ' tasks processed'
+    ? 'Stopped · ' + (evt.done ?? 0) + '/' + (evt.total ?? 0) + ' tasks processed'
     : 'Job finished: ' + (evt.ok ?? 0) + ' ok · ' + (evt.fail ?? 0) + ' fail');
   // Lý do dừng: chỉ còn khi NGƯỜI DÙNG bấm Stop (đã bỏ circuit breaker tự dừng
   // theo yêu cầu) — hiện thường trực để không tưởng job chạy hết bình thường.
   if (evt.stop_reason) {
-    toast('⏹ Đã dừng — ' + evt.stop_reason);
+    toast('⏹ Stopped — ' + evt.stop_reason);
     setStopNote(evt.stop_reason);
   }
   fillJobIdList();   // job vừa xong đã có file kết quả -> cập nhật lại lịch sử
@@ -1830,27 +2018,39 @@ function closeES() {
     state.es.close();
     state.es = null;
   }
+  state.connecting = false;
 }
 
 function connectES(jobId) {
   closeES();
+  state.connecting = true;
   let reconnecting = false;
   let hadConnection = false;
   const es = new EventSource('/api/stream/' + jobId);
   es.onmessage = e => {
-    try { handleEvent(JSON.parse(e.data)); } catch (err) { /* ignore malformed frames */ }
+    if (state.es !== es || state.jobId !== jobId) return;
+    let event;
+    try { event = JSON.parse(e.data); } catch (err) { return; }
+    state.streamRevision++;
+    handleEvent(event);
   };
   es.onopen = () => {
+    if (state.es !== es) return;
     if (reconnecting && hadConnection) {
       toast('Reconnected');
-      loadState(jobId);
     }
+    // Every stream connection starts with a server snapshot; another GET races it.
+    state.connecting = false;
+    updateRuntimeMetrics();
     reconnecting = false;
     hadConnection = true;
   };
   es.onerror = () => {
+    if (state.es !== es) return;
     if (!reconnecting) toast('Disconnected, retrying…');
     reconnecting = true;
+    state.connecting = true;
+    updateRuntimeMetrics();
   };
   state.es = es;
 }
@@ -1858,6 +2058,8 @@ function connectES(jobId) {
 /* -------------------------- snapshot reload ------------------------ */
 
 async function loadState(jobId) {
+  const revision = state.streamRevision;
+  const connection = state.es;
   let data;
   try {
     const res = await fetch('/api/state/' + jobId);
@@ -1866,26 +2068,37 @@ async function loadState(jobId) {
   } catch (e) {
     return;
   }
-  applySnapshot(data);
+  // Do not roll back newer stream events or replace a job selected while GET was pending.
+  if (state.jobId === jobId && state.es === connection && state.streamRevision === revision) applySnapshot(data);
 }
 
 function applySnapshot(data) {
-  tasks.clear();
-  els.taskList.innerHTML = '';
+  if (data.job_id && state.jobId && data.job_id !== state.jobId) return;
   state.jobId = data.job_id || state.jobId;
   setStopNote(data.stop_reason || '');   // job cũ mở lại vẫn thấy lý do dừng
   state.total = data.total || 0;
   state.mode = data.mode || 'auto';
   state.running = data.status === 'running';
+  state.jobStatus = data.status || '';
+  state.workers = data.workers || state.workers;
+  state.elapsedMs = data.elapsed_ms ?? data.duration_ms ?? 0;
+  state.elapsedAt = Date.now();
   state.stopping = !!data.stop_requested && state.running;
   setJobBadge(state.jobId);
   setSubmitState();
 
+  const seen = new Set();
   for (const td of data.tasks || []) {
-    const t = newTask(td.task_id);
+    const t = ensureTask(td.task_id);
+    seen.add(t.task_id);
+    if ((t.artifact || {}).upi_link !== (td.artifact || {}).upi_link) {
+      t.probe = null;
+      if (t._monitor) clearInterval(t._monitor);
+      t._monitor = null;
+    }
     t.index = td.index != null ? td.index : 0;
     t.email = td.email || '';
-    t.token = state.tokens[t.index] || '';
+    t.token = state.tokensJobId === state.jobId ? state.tokens[t.index] || '' : '';
     t.flow = td.flow || null;
     t.flow_label = td.flow_label || null;
     t.steps = (td.steps || []).map(s => ({
@@ -1907,24 +2120,39 @@ function applySnapshot(data) {
     // Kết luận của server về link (succeeded/failed/...) — snapshot mang sẵn,
     // trước đây bị bỏ nên sau F5 card chỉ còn biết kết quả lần dò của chính nó.
     t.linkState = td.link_state || '';
+    t.linkZero = !!td.link_zero;
     t.linkFlipAt = td.link_flip_at || 0;
     t.linkNote = td.link_note || '';
     t.created_at = td.created_at || null;
     t.updated_at = td.updated_at || null;
     t.logs = Array.isArray(td.logs) ? td.logs.slice() : [];
 
-    tasks.set(t.task_id, t);
-    t.el = createTaskEl(t);
-    els.taskList.appendChild(t.el.wrap);
-    renderRow(t);
+    queueTaskRender(t, true, true);
+  }
+  for (const [id, t] of tasks) {
+    if (seen.has(id)) continue;
+    if (t._monitor) clearInterval(t._monitor);
+    if (t.el) t.el.wrap.remove();
+    tasks.delete(id);
   }
   updateCounters();
 }
 
 /* --------------------------- job actions --------------------------- */
 
-function attachJob(jobId) {
+function attachJob(jobId, snapshot) {
+  closeES();
+  detachMonitors();
+  tasks.clear();
+  dirtyTasks.clear();
+  els.taskList.innerHTML = '';
   state.jobId = jobId;
+  state.total = 0;
+  state.workers = 0;
+  state.elapsedMs = 0;
+  state.elapsedAt = Date.now();
+  state.search = '';
+  if (els.taskSearch) els.taskSearch.value = '';
   setStopNote('');                 // job mới -> bỏ lý do dừng của job trước
   state.running = true;
   state.stopping = false;
@@ -1936,24 +2164,22 @@ function attachJob(jobId) {
   // state.filter không lưu vào localStorage nên F5 luôn quay về 'all'.
   setFilter('all');
   setSubmitState();
-  tasks.clear();
-  els.taskList.innerHTML = '';
   els.emptyState.hidden = true;
   updateCounters();
+  if (snapshot) applySnapshot(snapshot);
   connectES(jobId);
-  loadState(jobId);
 }
 
 async function runJob() {
   const tokens = getTokens();
   if (!tokens.length) return;
   if (tokens.length > MAX_TOKENS) {
-    toast('Max ' + MAX_TOKENS + ' tokens / batch.');
+    toast('Max ' + MAX_TOKENS + ' tokens per batch.');
     return;
   }
   const w = readWorkers();
   const workers = w.value;
-  if (w.clamped) toast('Workers capped at ' + MAX_WORKERS + ' — you asked for ' + w.raw + '.');
+  if (w.clamped) toast('Worker limit is ' + MAX_WORKERS + ' — you entered ' + w.raw + '.');
   const retriesInput = parseInt(els.retries.value, 10);
   const retries = Math.max(0, Math.min(5, Number.isNaN(retriesInput) ? 3 : retriesInput));
   const payload = {
@@ -1966,7 +2192,6 @@ async function runJob() {
     proxies: els.useProxy.checked ? getProxies() : null,
   };
 
-  state.tokens = tokens.slice();
   state.running = true;
   // Đánh dấu đang "chuẩn bị": server sẽ quét + lọc pool proxy trước khi tạo job
   // (nếu bật "Chỉ dùng proxy sạch"), khoảng này có thể kéo dài cả phút mà trước đây
@@ -1998,6 +2223,8 @@ async function runJob() {
     return;
   }
   state.starting = false;
+  state.tokens = tokens.slice();
+  state.tokensJobId = data.job_id;
   attachJob(data.job_id);
 }
 
@@ -2006,7 +2233,7 @@ async function stopJob() {
   // bấm Stop mà không thấy gì xảy ra, không biết là lệnh không gửi được hay đã gửi
   // nhầm job. Giờ mọi nhánh đều phải nói ra.
   if (!state.jobId) {
-    toast('Chưa gắn job nào để dừng — bấm Refresh hoặc chọn job trong lịch sử');
+    toast('No job attached to stop — press Refresh or pick a job from history');
     return;
   }
   const jid = state.jobId;
@@ -2014,7 +2241,7 @@ async function stopJob() {
   try {
     const res = await fetch('/api/stop/' + jid, { method: 'POST' });
     if (!res.ok) {
-      let message = 'Không gửi được lệnh dừng';
+      let message = 'Could not send the stop request';
       try { const body = await res.json(); if (body.detail) message = body.detail; } catch (e) { /* ignore */ }
       toast(message);
       return;
@@ -2025,27 +2252,36 @@ async function stopJob() {
   }
 
   // Xác nhận server ĐÃ nhận cho ĐÚNG job này, và còn bao nhiêu task phải chạy nốt.
+  if (state.jobId !== jid || !state.running) return;
+  const revision = state.streamRevision;
+  const connection = state.es;
   let left = null;
   try {
     const res = await fetch('/api/state/' + jid);
     if (res.ok) {
       const d = await res.json();
+      if (state.jobId !== jid || !state.running) return;
+      if (d.status === 'done' || d.status === 'stopped') {
+        if (state.streamRevision === revision && state.es === connection) applySnapshot(d);
+        return;
+      }
       const running = (d.tasks || []).filter(t => t.status === 'running').length;
       left = running;
       if (d.stop_requested === false) {
-        toast('Server chưa ghi nhận lệnh dừng cho job ' + jid + ' — thử lại');
+        toast('Server has not recorded the stop for job ' + jid + ' — try again');
         return;
       }
     }
   } catch (e) { /* không xác nhận được thì vẫn báo đã gửi */ }
 
-  state.stopping = true;
-  setSubmitState();
+  // A final SSE event can settle the job while either request is still pending.
+  if (state.jobId !== jid || !state.running) return;
+  onJobStopping();
   const tail = (left === null)
     ? ''
-    : ' — còn ' + left + ' task đang chạy phải kết thúc trước';
-  toast((reSending ? 'Đã gửi lại lệnh dừng job ' : 'Đã gửi lệnh dừng job ') + jid + tail);
-  setStopNote('Đang dừng job ' + jid + tail);
+    : ' — ' + left + ' tasks still running must finish first';
+  toast((reSending ? 'Re-sent stop for job ' : 'Stop sent for job ') + jid + tail);
+  setStopNote('Stopping job ' + jid + tail);
 }
 
 /* Đẩy token đang có trong ô "Access tokens" vào queue của JOB HIỆN TẠI.
@@ -2057,9 +2293,9 @@ async function stopJob() {
    Khác nút "Run N checkout tasks": nút Run tạo job MỚI, nút này thêm vào job CŨ.
 */
 async function pushToQueue() {
-  if (!state.jobId) { toast('Chưa có job nào — hãy bấm Run trước'); return; }
+  if (!state.jobId) { toast('No job yet — press Run first'); return; }
   const tokens = getTokens();
-  if (!tokens.length) { toast('Ô Access tokens đang trống'); return; }
+  if (!tokens.length) { toast('The Access tokens box is empty'); return; }
   if (els.pushQueue) els.pushQueue.disabled = true;
   try {
     const res = await fetch('/api/append/' + state.jobId, {
@@ -2068,11 +2304,11 @@ async function pushToQueue() {
       body: JSON.stringify({ tokens: tokens.join('\n') }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) { toast(data.detail || 'Push thất bại'); return; }
-    const skipped = data.skipped ? (' — bỏ qua ' + data.skipped + ' acc trùng') : '';
-    toast('Đã push ' + data.added + ' acc vào queue' + skipped);
+    if (!res.ok) { toast(data.detail || 'Push failed'); return; }
+    const skipped = data.skipped ? (' — skipped ' + data.skipped + ' duplicates') : '';
+    toast('Pushed ' + data.added + ' accounts into the queue' + skipped);
   } catch (e) {
-    toast('Push thất bại');
+    toast('Push failed');
   } finally {
     updatePushQueue();
   }
@@ -2095,24 +2331,27 @@ function updatePushQueue() {
   // để không bấm được rồi nhận lỗi, và nói rõ lý do.
   if (state.stopping) {
     els.pushQueue.disabled = true;
-    els.pushQueue.title = 'Job đang dừng — đợi dừng xong rồi bấm Run để tạo job mới';
+    els.pushQueue.title = 'Job is stopping — wait for it to finish, then press Run for a new job';
     return;
   }
   els.pushQueue.disabled = n === 0;
   els.pushQueue.title = n === 0
-    ? 'Ô Access tokens đang trống — dán token vào trước'
-    : 'Đẩy ' + n + ' token vào queue của job ' + state.jobId;
+    ? 'The Access tokens box is empty — paste tokens first'
+    : 'Push ' + n + ' tokens into the queue of job ' + state.jobId;
 }
 
 async function retryTask(t) {
   if (!state.jobId) return;
+  const jobId = state.jobId;
   try {
-    const res = await fetch('/api/retry/' + state.jobId + '/' + t.task_id, { method: 'POST' });
+    const res = await fetch('/api/retry/' + jobId + '/' + t.task_id, { method: 'POST' });
     if (!res.ok) { toast('Retry failed'); return; }
   } catch (e) {
     toast('Retry failed');
     return;
   }
+  // Completed jobs close their stream. Reconnect so an accepted retry is visible.
+  if (state.jobId === jobId && !state.es) connectES(jobId);
   // task_init/task_start SSE events reset the row from server state.
 }
 
@@ -2120,7 +2359,7 @@ async function removeTask(t) {
   const who = t.email || t.task_id;
   const okRemove = await confirmDialog({
     title: 'Remove this task?',
-    text: who + '\nAlso deletes the server copy. Cannot be undone.',
+    text: who + '\nThe server copy is deleted too. This cannot be undone.',
     okLabel: 'Remove task',
   });
   if (!okRemove) return;
@@ -2213,12 +2452,16 @@ function loadForm() {
 function updatePoolStatus() {
   const n = els.proxies.value.split('\n').map(s => s.trim()).filter(Boolean).length;
   els.poolStatus.hidden = !(els.useProxy.checked && n > 0);
-  els.poolCount.textContent = n + ' proxies in pool';
+  els.poolCount.textContent = n + ' proxy trong pool';
 }
 
 /* ----------------------------- init -------------------------------- */
 
 function bindEvents() {
+  if (els.taskSearch) els.taskSearch.addEventListener('input', () => {
+    state.search = els.taskSearch.value.trim().toLowerCase();
+    updateCounters();
+  });
   els.tokens.addEventListener('input', () => {
     updateTokenCount();
     updatePushQueue();
@@ -2259,15 +2502,15 @@ function bindEvents() {
   els.btnRefresh.addEventListener('click', () => {
     if (state.jobId) {
       loadState(state.jobId);
-      toast('Refreshed');
+      toast('Refresh requested');
     }
   });
   els.pushQueue.addEventListener('click', pushToQueue);
   els.btnCopyEmails.addEventListener('click', async () => {
     const list = approvedEmails();
-    if (!list.length) { toast('Chưa có acc nào quét thành công'); return; }
+    if (!list.length) { toast('No accounts scanned successfully yet'); return; }
     const ok = await copyToClipboard(list.join('\n'));
-    toast(ok ? ('Đã copy ' + list.length + ' email (mỗi dòng 1 acc)') : 'Copy lỗi — thử lại');
+    toast(ok ? ('Copied ' + list.length + ' emails (one per line)') : 'Copy failed — try again');
   });
   els.btnClearTab.addEventListener('click', () => clearTab(state.filter, els.btnClearTab));
   els.btnNotify.addEventListener('click', toggleNotify);
@@ -2319,7 +2562,7 @@ function renderGlobalStats(data) {
     : 'no data yet';
 
   if (!days.length) {
-    els.gstatsChart.innerHTML = '<div class="gstats-empty">No ₹0.00 codes extracted yet</div>';
+    els.gstatsChart.innerHTML = '<div class="gstats-empty">No ₹0.00 codes yet</div>';
   } else {
     const max = Math.max.apply(null, days.map(d => d.zero).concat([1]));
     const today = new Date().toISOString().slice(0, 10);

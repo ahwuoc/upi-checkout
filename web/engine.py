@@ -21,6 +21,7 @@ import secrets
 import sys
 import threading
 import time
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -46,6 +47,7 @@ MAX_LOGS_PER_TASK = 200
 # Trần số access token mỗi batch. 1000 task × ~200s / 20 worker ≈ 3 tiếng;
 # snapshot bị cắt log theo `Job._log_tail()` để payload không phình theo.
 MAX_TOKENS_PER_BATCH = 1000
+MAX_WORKERS = 200
 SUBSCRIBER_QUEUE = 5000
 
 # trang thai coi la thanh cong.
@@ -117,6 +119,13 @@ class Task:
     link_fam: str = ""
     link_zero: bool = False
     link_note: str = ""
+    # Acc đã lên Plus chưa (xem at_check.py). Bám mốc "khách đã duyệt mandate"
+    # (link_state == succeeded) rồi dò lại vài lần: duyệt mandate mới chỉ là đồng ý
+    # cho phép trừ tiền, khách còn phải trả rồi OpenAI mới nâng cấp — dò ngay lúc
+    # duyệt thì gần như luôn ra "chưa".
+    plus_state: str = ""             # "" | checking | plus | not_plus
+    plus_checked_at: int = 0         # epoch lần dò gần nhất
+    plus_note: str = ""              # chi tiết thô: "AT 401 · promo active"
     no_retry: bool = False           # lỗi cấp account -> đừng retry (risk decline)
     no_retry_reason: str = ""
     done_at: int = 0                 # epoch lúc task xong -> UI sắp tab Success theo mốc này
@@ -169,6 +178,9 @@ class Task:
             "link_fam": self.link_fam,
             "link_zero": self.link_zero,
             "link_note": self.link_note,
+            "plus_state": self.plus_state,
+            "plus_checked_at": self.plus_checked_at,
+            "plus_note": self.plus_note,
             "logs": self.logs[-max(0, log_tail):] if log_tail else [],
         }
 
@@ -196,11 +208,17 @@ class Job:
         self.finished_at: str | None = None
         self.duration_ms: int | None = None
         self._t0 = time.time()
-        self._lock = threading.Lock()
-        # 1 hang so slot dung CHUNG cho ca job. Moi duong chay task (chay dau, push vao
-        # queue, retry le) deu phai qua day, nen du co nhieu ThreadPool/thread thi tong
-        # so task chay song song luon dung bang workers — khong the vuot.
-        self._slots = threading.BoundedSemaphore(max(1, int(workers)))
+        self._lock = threading.RLock()
+        # One executor owns initial tasks, appends and retries. Queue entries, not
+        # waiting threads, reserve work; a task stays reserved through all retries.
+        self._executor: ThreadPoolExecutor | None = None
+        self._pending: set[str] = set()
+        self._proxy_file: Path | None = None
+        self._proxies: list[str] = []
+        self._next_index = len(tokens)
+        self._last_checkpoint = 0.0
+        self.state_dir = STATE_DIR / job_id
+        self.state_dir.mkdir(parents=True, exist_ok=True)
         self._subs: list[queue.Queue] = []
 
         # Log ben vung: moi job 1 file, khong mat khi restart server.
@@ -223,9 +241,9 @@ class Job:
 
     # -- log file ----------------------------------------------------------
     def log_line(self, line: str) -> None:
-        if self._log_fh is None:
-            return
         with self._log_lock:
+            if self._log_fh is None:
+                return
             try:
                 self._log_fh.write(f"[{_now()}] {line}\n")
                 self._log_fh.flush()
@@ -270,14 +288,22 @@ class Job:
             self.log_line(f"=== JOB DONE ok={event.get('ok')} fail={event.get('fail')} "
                           f"total={event.get('total')} {event.get('duration_ms')}ms")
 
-    def write_results(self) -> None:
+    def write_results(self, *, checkpoint: bool = False) -> None:
         """Ghi snapshot cuoi cung ra file JSON (doc lap voi RAM)."""
-        try:
-            self.results_path.write_text(
-                json.dumps(self.snapshot(), ensure_ascii=False, indent=2),
-                encoding="utf-8")
-        except OSError:
-            pass
+        # Serialize writers and atomically replace: history readers never see
+        # half a JSON document, including concurrent completion/removal.
+        with self._lock:
+            now = time.monotonic()
+            if checkpoint and now - self._last_checkpoint < 2:
+                return
+            try:
+                temp = self.results_path.with_suffix(".json.tmp")
+                temp.write_text(json.dumps(self.snapshot(), ensure_ascii=False,
+                                           separators=(",", ":")), encoding="utf-8")
+                temp.replace(self.results_path)
+                self._last_checkpoint = now
+            except OSError:
+                pass
 
     def close_log(self) -> None:
         with self._log_lock:
@@ -303,32 +329,42 @@ class Job:
     def emit(self, event: dict) -> None:
         self._log_event(event)
         with self._lock:
-            subs = list(self._subs)
-        for q in subs:
-            try:
-                q.put_nowait(event)
-            except queue.Full:
-                # client qua cham -> bo event cu nhat de giu tien do moi nhat
+            for q in self._subs:
                 try:
-                    q.get_nowait()
                     q.put_nowait(event)
-                except (queue.Empty, queue.Full):
-                    pass
+                except queue.Full:
+                    # Losing a lifecycle event requires a fresh snapshot, not
+                    # an arbitrary drop that leaves the browser stale forever.
+                    while True:
+                        try:
+                            q.get_nowait()
+                        except queue.Empty:
+                            break
+                    q.put_nowait({"type": "resync"})
 
     # -- thong ke ----------------------------------------------------------
     @property
     def done(self) -> int:
-        return sum(1 for t in self.tasks.values() if t.status in ("done", "fail", "stopped"))
+        with self._lock:
+            return sum(1 for t in self.tasks.values() if t.status in ("done", "fail", "stopped"))
 
     @property
     def ok(self) -> int:
-        return sum(1 for t in self.tasks.values() if t.status == "done" and t.raw_status in OK_STATUS)
+        with self._lock:
+            return sum(1 for t in self.tasks.values() if t.status == "done" and t.raw_status in OK_STATUS)
 
     @property
     def fail(self) -> int:
-        return sum(1 for t in self.tasks.values() if t.status == "fail")
+        with self._lock:
+            return sum(1 for t in self.tasks.values() if t.status == "fail")
 
     def snapshot(self) -> dict:
+        with self._lock:
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self) -> dict:
+        tasks = [deepcopy(self.tasks[tid].to_dict(log_tail=self._log_tail()))
+                 for tid in self.order]
         return {
             "job_id": self.job_id,
             "mode": self.mode,
@@ -336,10 +372,13 @@ class Job:
             "promo": self.promo,
             "workers": self.workers,
             "retries": self.retries,
-            "total": self.total,
-            "done": self.done,
-            "ok": self.ok,
-            "fail": self.fail,
+            "total": len(tasks),
+            "done": sum(t["status"] in ("done", "fail", "stopped") for t in tasks),
+            "ok": sum(t["status"] == "done" and t["raw_status"] in OK_STATUS for t in tasks),
+            "fail": sum(t["status"] == "fail" for t in tasks),
+            "running": sum(t["status"] == "running" for t in tasks),
+            "queued": sum(t["status"] == "pending" for t in tasks),
+            "elapsed_ms": int((time.time() - self._t0) * 1000) if self.status == "running" else self.duration_ms,
             "status": self.status,
             "stop_requested": self.stop_requested,
             "proxy_source": self.proxy_source,
@@ -349,8 +388,7 @@ class Job:
             "duration_ms": self.duration_ms,
             "log_path": str(self.log_path),
             "results_path": str(self.results_path),
-            "tasks": [self.tasks[tid].to_dict(log_tail=self._log_tail())
-                      for tid in self.order],
+            "tasks": tasks,
         }
 
     def _log_tail(self) -> int:
@@ -373,7 +411,6 @@ class Job:
 _JOBS: dict[str, Job] = {}
 _JOB_ORDER: list[str] = []
 _JOBS_LOCK = threading.Lock()
-_POOLS: dict[str, ThreadPoolExecutor] = {}
 
 
 def get_job(job_id: str) -> Job | None:
@@ -458,6 +495,64 @@ def _monitor_one(job: Job, task: Task) -> None:
               "link_checked_at": now, "link_flip_at": now, "link_fam": task.link_fam,
               "link_zero": zero, "link_note": note, "age": age, "probe": probe})
 
+    if new_state == "succeeded":
+        # Khách vừa duyệt mandate -> bắt đầu dò xem acc có lên Plus không.
+        _start_plus_check(job, task)
+
+
+# Nhịp dò Plus sau khi khách duyệt mandate: dò ngay rồi thưa dần. Khách thường trả
+# tiền trong vài phút; 6 lần trong ~25 phút là đủ mà không tốn proxy vô hạn.
+PLUS_CHECK_DELAYS = (0, 60, 180, 300, 600, 900)
+
+
+def _start_plus_check(job: Job, task: Task) -> None:
+    """Bắt đầu dò xem acc đã lên Plus chưa. Mỗi task chỉ dò một lần."""
+    with job._lock:
+        if task.plus_state:
+            return                      # đang dò hoặc đã có kết luận
+        task.plus_state = "checking"
+    job.emit({"type": "task_plus", "task_id": task.task_id, "plus_state": "checking"})
+    threading.Thread(target=_plus_check_loop,
+                     args=(job, task, task.token,
+                           str((task.egress or {}).get("proxy") or "")),
+                     name="plus-%s" % task.task_id, daemon=True).start()
+
+
+def _plus_check_loop(job: Job, task: Task, token: str, proxy: str) -> None:
+    try:
+        import at_check
+    except ImportError as exc:
+        job.log_line("[%s] plus: khong import duoc at_check (%s)" % (task.task_id, exc))
+        with job._lock:
+            task.plus_state = "not_plus"
+        return
+    for delay in PLUS_CHECK_DELAYS:
+        if delay:
+            time.sleep(delay)
+        try:
+            res = at_check.check(token, proxy)
+        except Exception as exc:  # noqa: BLE001 — vòng nền không được chết
+            job.log_line("[%s] plus: loi khi kiem tra (%s)" % (task.task_id, str(exc)[:120]))
+            continue
+        plus = bool(res.get("plus"))
+        with job._lock:
+            task.plus_checked_at = int(time.time())
+            task.plus_note = str(res.get("note") or "")
+            task.plus_state = "plus" if plus else "checking"
+        job.emit({"type": "task_plus", "task_id": task.task_id,
+                  "plus_state": task.plus_state, "plus_note": task.plus_note,
+                  "plus_checked_at": task.plus_checked_at})
+        if plus:
+            job.log_line("[%s] plus: DA LEN PLUS (%s)" % (task.task_id, task.plus_note))
+            return
+    with job._lock:
+        if task.plus_state == "checking":
+            task.plus_state = "not_plus"
+    job.emit({"type": "task_plus", "task_id": task.task_id, "plus_state": "not_plus",
+              "plus_note": task.plus_note, "plus_checked_at": task.plus_checked_at})
+    job.log_line("[%s] plus: chua len Plus sau %d lan do (%s)"
+                 % (task.task_id, len(PLUS_CHECK_DELAYS), task.plus_note))
+
 
 def _link_monitor_loop() -> None:
     while True:
@@ -538,14 +633,15 @@ def clear_tasks(job_id: str, scope: str = "all") -> dict:
     if job is not None:
         with job._lock:
             doomed = [tid for tid, task in job.tasks.items()
-                      if scope == "all" or _bucket({
+                      if tid not in job._pending and (scope == "all" or _bucket({
                           "status": task.status, "raw_status": getattr(task, "raw_status", ""),
-                      }) == scope]
+                      }) == scope)]
             for tid in doomed:
                 job.tasks.pop(tid, None)
                 if tid in job.order:
                     job.order.remove(tid)
             removed = len(doomed)
+            job.total = len(job.order)
         if removed:
             # total 是普通属性可以改；done / ok / fail 是 @property（281~289 行）
             # 由 tasks 自己算出来的，**赋值会抛 AttributeError**。删完 task 它们
@@ -564,7 +660,7 @@ def clear_tasks(job_id: str, scope: str = "all") -> dict:
     removed = len(tasks) - len(kept)
     snapshot["tasks"] = kept
     snapshot["total"] = len(kept)
-    snapshot["done"] = sum(1 for t in kept if _bucket(t) in ("success", "fail"))
+    snapshot["done"] = sum(1 for t in kept if _bucket(t) in ("success", "fail", "stopped"))
     snapshot["ok"] = sum(1 for t in kept if _bucket(t) == "success")
     snapshot["fail"] = sum(1 for t in kept if _bucket(t) == "fail")
     path = LOG_DIR / f"web_{job_id}_results.json"
@@ -591,7 +687,7 @@ def remove_task(job_id: str, task_id: str) -> dict:
             task = job.tasks.get(task_id)
             if task is None:
                 return {"ok": False, "error": "task not found in job", "removed": 0}
-            if job.status == "running" and task.status in ("running", "pending"):
+            if task_id in job._pending or task.status in ("running", "pending"):
                 return {"ok": False, "removed": 0,
                         "error": "task is running/queued — stop the job before removing"}
             job.tasks.pop(task_id, None)
@@ -628,21 +724,36 @@ def get_saved_snapshot(job_id: str) -> dict | None:
         return None
     path = LOG_DIR / f"web_{job_id}_results.json"
     try:
-        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(data, dict):
+        return None
+    # A saved running job without an owner was interrupted by server exit.
+    # Never silently resume payment work or show phantom running workers.
+    if job_id not in _JOBS and data.get("status") == "running":
+        data.update(status="stopped", stop_requested=True,
+                    stop_reason="server restarted — unfinished tasks were not resumed")
+        tasks = data.get("tasks") or []
+        for task in tasks:
+            if task.get("status") in ("running", "pending"):
+                task.update(status="stopped", raw_status="STOPPED", error=data["stop_reason"])
+        data["done"] = sum(t.get("status") in ("done", "fail", "stopped") for t in tasks)
+        data["running"] = data["queued"] = 0
+    return data
 
 
 def list_jobs() -> list[dict]:
     out = []
     seen = set()
-    for jid in reversed(_JOB_ORDER):
-        j = _JOBS.get(jid)
+    with _JOBS_LOCK:
+        jobs = [_JOBS.get(jid) for jid in reversed(_JOB_ORDER)]
+    for j in jobs:
         if j:
             out.append({"job_id": j.job_id, "status": j.status, "total": j.total,
                         "done": j.done, "ok": j.ok, "fail": j.fail,
                         "started_at": j.started_at})
-            seen.add(jid)
+            seen.add(j.job_id)
     try:
         result_files = sorted(LOG_DIR.glob("web_*_results.json"),
                               key=lambda p: p.stat().st_mtime, reverse=True)
@@ -1126,7 +1237,7 @@ def _set_flow(job: Job, task: Task, flow: str, session: str = "", provider: str 
     task.set_steps(cli.steps_for(flow))
     job.emit({"type": "task_flow", "task_id": task.task_id, "flow": flow,
               "flow_label": FLOW_LABEL.get(flow, flow), "session": task.session,
-              "provider": task.provider, "steps": task.steps})
+              "provider": task.provider, "steps": deepcopy(task.steps)})
 
 
 def _verify_link(job: Job, task: Task, result: dict, link: str) -> None:
@@ -1175,6 +1286,9 @@ def _verify_link(job: Job, task: Task, result: dict, link: str) -> None:
         return
 
     task.link_state = str(probe.get("status") or "")
+    if task.link_state == "succeeded":
+        # Mandate đã được duyệt ngay lúc task xong -> dò Plus luôn (khỏi chờ monitor).
+        _start_plus_check(job, task)
 
     good, label = artifact_probe.judge(probe)
     result["zero_mandate"] = bool(good)
@@ -1227,7 +1341,7 @@ def _finish(job: Job, task: Task, result: dict, t0: float) -> None:
             if not s.get("err"):
                 s["err"] = task.error or task.raw_status
 
-    task.status = "done" if ok else "fail"
+    task.status = "done" if ok else ("stopped" if task.raw_status.upper() == "STOPPED" else "fail")
     task.updated_at = _now()
     task.done_at = int(time.time())
     job.emit({"type": "task_done", "task_id": task.task_id, "ok": ok,
@@ -1239,18 +1353,25 @@ def _finish(job: Job, task: Task, result: dict, t0: float) -> None:
 
 # -------------------------------------------------------------- task running
 def _run_task(job: Job, task: Task, proxy_file: Path, proxies: list[str]) -> bool:
-    task.status = "running"
-    task.run += 1
-    task.error = None
-    task.updated_at = _now()
-    job.emit({"type": "task_start", "task_id": task.task_id, "run": task.run,
-              "flow": task.flow})
+    with job._lock:
+        if job.stop_requested:
+            _finish(job, task, {"status": "STOPPED", "err": "job stopped"}, time.time())
+            return False
+        task.status = "running"
+        task.run += 1
+        task.error = None
+        task.updated_at = _now()
+        job.emit({"type": "task_start", "task_id": task.task_id, "run": task.run,
+                  "flow": task.flow})
 
     step, on_log, on_geo = _mk_hooks(job, task)
     # Moi worker tu lay + tu cham proxy cua minh (xem _acquire_proxy): job bat dau
     # ngay, khong con phai cho cham ca pool o POST /api/run. Proxy da verify duoc
     # ghi thanh seed rieng cua task -> ca luong CS cung dung dung IP sach do.
     proxy, seed, verdict = _acquire_proxy(job, task, proxies, proxy_file)
+    if job.stop_requested:
+        _finish(job, task, {"status": "STOPPED", "err": "job stopped"}, time.time())
+        return False
     if verdict:
         ex = {k: verdict.get(k) for k in ("ip", "country", "timezone", "risk", "verdict",
                                           "user_type", "isp", "latency_ms", "family")}
@@ -1302,7 +1423,7 @@ def _run_task(job: Job, task: Task, proxy_file: Path, proxies: list[str]) -> boo
 
 def _backend_request(job: Job, task: Task, proxy: str, seed: Path) -> backend.BackendRequest:
     return backend.BackendRequest(
-        token=task.token, proxy=proxy, seed_file=seed, state_dir=STATE_DIR,
+        token=task.token, proxy=proxy, seed_file=seed, state_dir=job.state_dir,
         index=task.index, country=job.country, promo=job.promo,
         retry_limit=job.retries,
     )
@@ -1348,18 +1469,27 @@ def _reset_task_for_retry(job: Job, task: Task) -> None:
     task.raw_status = ""
     task.duration_ms = None
     task.done_at = 0
+    task.link_state = ""
+    task.link_checked_at = task.link_first_seen = task.link_flip_at = 0
+    task.link_fam = task.link_note = ""
+    task.link_zero = False
+    task.no_retry = False
+    task.no_retry_reason = ""
+    task.egress = None
     task.status = "pending"
     task.updated_at = _now()
     job.emit({"type": "task_init", "task_id": task.task_id, "index": task.index,
-              "email": task.email, "flow": None, "steps": task.steps, "run": task.run})
+              "email": task.email, "flow": None, "steps": deepcopy(task.steps), "run": task.run})
 
 
 def _run_with_retries(job: Job, task: Task, proxy_file: Path,
                       proxies: list[str]) -> None:
     for retry in range(job.retries + 1):
+        if job.stop_requested:
+            if task.status == "pending":
+                _finish(job, task, {"status": "STOPPED", "err": "job stopped"}, time.time())
+            break
         if retry:
-            if job.stop_requested:
-                break
             if task.no_retry:
                 # Account đã bị Stripe gắn cờ (risk decline): chạy lại chỉ tốn thêm
                 # ~2 phút + 1 checkout nữa rồi cũng decline y hệt.
@@ -1373,35 +1503,23 @@ def _run_with_retries(job: Job, task: Task, proxy_file: Path,
 
 
 def _run_task_limited(job: Job, task: Task, proxy_file: Path, proxies: list[str]) -> None:
-    """Chay 1 task qua slot chung cua job (boc ngoai _run_with_retries).
-
-    Truoc day moi duong tu tao ThreadPool rieng (chay dau 1 pool, push queue 1 pool),
-    nen workers=200 ma push them la chay 400. Gio semaphore cua job la noi duy nhat
-    quyet dinh so task song song.
-    """
-    with job._slots:
+    """Only the job executor calls this; queued work checks Stop on entry."""
+    try:
         _run_with_retries(job, task, proxy_file, proxies)
+    except Exception as exc:  # include proxy/setup errors, not just protocol errors
+        _finish(job, task, {"status": "ERROR", "err": str(exc)[:200]}, time.time())
+    finally:
+        _release_task_proxy(job.job_id, task.task_id)
+        with job._lock:
+            job._pending.discard(task.task_id)
+            if not job._pending:
+                _complete_job(job)
+            else:
+                job.write_results(checkpoint=True)
 
 
-def _job_worker(job: Job, proxy_file: Path, proxies: list[str]) -> None:
-    for tid in job.order:
-        job.emit({"type": "task_init", "task_id": tid, "index": job.tasks[tid].index,
-                  "email": job.tasks[tid].email, "flow": job.tasks[tid].flow,
-                  "steps": job.tasks[tid].steps, "run": 0})
-
-    def work(tid: str) -> None:
-        if job.stop_requested:
-            t = job.tasks[tid]
-            t.status = "stopped"
-            job.emit({"type": "task_done", "task_id": tid, "ok": False,
-                      "status": "STOPPED", "error": "job stopped", "duration_ms": 0})
-            return
-        _run_task_limited(job, job.tasks[tid], proxy_file, proxies)
-
-    with ThreadPoolExecutor(max_workers=max(1, min(job.workers, job.total))) as ex:
-        list(ex.map(work, job.order))
-
-    # Job xong -> xoa state proxy cua job (lease/bad/index) de khong phinh theo so job
+def _complete_job(job: Job) -> None:
+    """Caller holds job._lock; append/retry cannot race finalization."""
     _clear_job_proxy_state(job.job_id)
     job.duration_ms = int((time.time() - job._t0) * 1000)
     job.finished_at = _now()
@@ -1414,8 +1532,48 @@ def _job_worker(job: Job, proxy_file: Path, proxies: list[str]) -> None:
     job.write_results()
     _cleanup_job_files(job)
     job.close_log()
-    with _JOBS_LOCK:
-        _POOLS.pop(job.job_id, None)
+    executor, job._executor = job._executor, None
+    if executor is not None:
+        executor.shutdown(wait=False)
+
+
+def _enqueue_tasks(job: Job, tasks: list[Task]) -> None:
+    """Reserve the entire batch before any worker can complete it.
+
+    Caller holds job._lock. One standard executor is the queue and the worker
+    limit; no thread-per-append and no second semaphore/pool to coordinate.
+    """
+    if not tasks:
+        return
+    reopening = job.status != "running"
+    if reopening:
+        job.status = "running"
+        job.stop_requested = False
+        job.stop_reason = ""
+        job.finished_at = None
+        job.duration_ms = None
+        with job._log_lock:
+            if job._log_fh is None:
+                try:
+                    job._log_fh = job.log_path.open("a", encoding="utf-8")
+                except OSError:
+                    pass
+    if job._executor is None:
+        job._executor = ThreadPoolExecutor(max_workers=job.workers,
+                                           thread_name_prefix=f"job-{job.job_id}")
+    job._pending.update(t.task_id for t in tasks)
+    if reopening:
+        job.emit({"type": "job_start", "job_id": job.job_id, "mode": job.mode,
+                  "total": job.total, "workers": job.workers, "retries": job.retries,
+                  "country": job.country, "promo": job.promo, "proxy_source": job.proxy_source,
+                  "started_at": job.started_at})
+    for task in tasks:
+        job.emit({"type": "task_init", "task_id": task.task_id, "index": task.index,
+                  "email": task.email, "flow": task.flow,
+                  "steps": deepcopy(task.steps), "run": task.run})
+    job.write_results(checkpoint=not reopening)
+    for task in tasks:
+        job._executor.submit(_run_task_limited, job, task, job._proxy_file, job._proxies)
 
 
 # ---------------------------------------------------------------- public API
@@ -1426,18 +1584,29 @@ def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: i
         raise ValueError("no tokens")
     if len(tokens) > MAX_TOKENS_PER_BATCH:
         raise ValueError(f"max {MAX_TOKENS_PER_BATCH} tokens per batch")
+    if not 1 <= workers <= MAX_WORKERS:
+        raise ValueError(f"workers must be within 1..{MAX_WORKERS}")
+    if not 0 <= retries <= 5:
+        raise ValueError("retries must be within 0..5")
+    if mode not in ("auto", "oaics", "cs"):
+        raise ValueError("invalid mode")
 
     STATE_DIR.mkdir(exist_ok=True)
     job_id = secrets.token_hex(6)
     proxy_file, px, label, quality = _prepare_proxies(job_id, proxies, len(tokens))
     job = Job(job_id, mode, tokens, country, promo, workers, label, retries)
+    job._proxy_file, job._proxies = proxy_file, px
 
     with _JOBS_LOCK:
         _JOBS[job_id] = job
         _JOB_ORDER.append(job_id)
-        while len(_JOB_ORDER) > MAX_JOBS:
-            old = _JOB_ORDER.pop(0)
-            _JOBS.pop(old, None)
+        # Never evict live work: it must remain visible and stoppable.
+        for old in list(_JOB_ORDER):
+            if len(_JOB_ORDER) <= MAX_JOBS:
+                break
+            if _JOBS[old].status != "running":
+                _JOB_ORDER.remove(old)
+                _JOBS.pop(old, None)
 
     job.emit({"type": "job_start", "job_id": job_id, "mode": mode, "total": job.total,
               "country": country, "promo": promo, "workers": job.workers,
@@ -1472,45 +1641,41 @@ def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: i
             job.emit({"type": "log", "task_id": "*",
                       "line": f"proxy quality: bỏ qua ({quality['error']})"})
 
-    th = threading.Thread(target=_job_worker, args=(job, proxy_file, px), daemon=True)
-    th.start()
+    with job._lock:
+        _enqueue_tasks(job, list(job.tasks.values()))
     return job
 
 
 def stop_job(job_id: str) -> bool:
     job = get_job(job_id)
-    if not job or job.status != "running":
+    if not job:
         return False
-    job.stop_requested = True
-    if not job.stop_reason:
-        job.stop_reason = "dừng theo yêu cầu (bạn bấm Stop) — các task còn lại bị bỏ"
-    job.emit({"type": "job_stopping", "job_id": job.job_id})
-    job.emit({"type": "log", "task_id": "*", "line": "== stop requested =="})
+    with job._lock:
+        if job.status != "running":
+            return False
+        job.stop_requested = True
+        if not job.stop_reason:
+            job.stop_reason = "stopped on request (you pressed Stop) — remaining tasks are skipped"
+        job.emit({"type": "job_stopping", "job_id": job.job_id})
+        job.emit({"type": "log", "task_id": "*", "line": "== stop requested =="})
     return True
 
 
 def retry_task(job_id: str, task_id: str) -> bool:
     job = get_job(job_id)
-    if not job or task_id not in job.tasks:
+    if not job:
         return False
-    task = job.tasks[task_id]
-    if task.status == "running":
-        return False
-
-    proxy_file = DEFAULT_PROXY_FILE
-    if job.proxy_source.startswith("custom proxy pool"):
-        p = STATE_DIR / f"web_proxies_{job_id}.txt"
-        if not p.exists():
-            # Thiếu file proxy của job -> KHÔNG retry bằng pool mặc định: task sẽ chạy
-            # bằng proxy khác hẳn pool bạn chọn mà không ai biết. Thà báo không retry được.
+    with job._lock:
+        task = job.tasks.get(task_id)
+        if (task is None or task_id in job._pending
+                or task.status in ("running", "pending")
+                or (job.status == "running" and job.stop_requested)):
             return False
-        proxy_file = p
-    proxies = cli.load_proxies(proxy_file)
-
-    task.logs = []
-    _reset_task_for_retry(job, task)
-    threading.Thread(target=_run_task_limited, args=(job, task, proxy_file, proxies),
-                     daemon=True).start()
+        if job._proxy_file is None or not job._proxy_file.is_file():
+            return False
+        task.logs = []
+        _reset_task_for_retry(job, task)
+        _enqueue_tasks(job, [task])
     return True
 
 
@@ -1520,7 +1685,7 @@ def append_tasks(job_id: str, tokens: list[str]) -> dict:
     Vì sao cần: trước đây muốn chạy thêm acc thì phải bấm Stop rồi gửi job mới —
     mất phần đang chạy, và phải chấm lại pool proxy từ đầu. Hàm này nối thẳng vào
     job hiện có: **giữ nguyên pool proxy của job**, thêm task vào cuối `order`,
-    rồi cấp worker riêng cho đúng phần vừa thêm.
+    rồi đưa task vào cùng executor đang chạy.
 
     Bỏ qua token trùng (đã có trong job, hoặc trùng nhau trong lần thêm này) —
     chạy lại cùng một acc vừa tốn thời gian vừa tốn hạn mức proxy.
@@ -1529,15 +1694,13 @@ def append_tasks(job_id: str, tokens: list[str]) -> dict:
     if job is None:
         return {"ok": False, "error": "job does not exist", "added": 0, "skipped": 0}
 
-    # Job đang được yêu cầu dừng: KHÔNG nhận thêm. Trước đây push lúc này vẫn nhận
-    # và phần vừa push chạy tiếp (đường append không kiểm tra cờ stop) -> bấm Stop
-    # xong job vẫn chạy, đúng cảm giác "ấn Stop mà không dừng".
-    if job.stop_requested:
-        return {"ok": False, "added": 0, "skipped": 0,
-                "error": "job đang dừng — không push thêm được. Đợi dừng xong rồi bấm Run."}
-
     clean = [str(t).strip() for t in (tokens or []) if str(t).strip()]
     with job._lock:
+        if job.stop_requested:
+            return {"ok": False, "added": 0, "skipped": 0,
+                    "error": "job is stopping — cannot push more. Press Run to start a new job."}
+        if job._proxy_file is None or not job._proxy_file.is_file():
+            return {"ok": False, "added": 0, "error": "job proxy file is missing"}
         known = {t.token for t in job.tasks.values()}
         fresh = []
         skipped = 0
@@ -1549,90 +1712,25 @@ def append_tasks(job_id: str, tokens: list[str]) -> dict:
             fresh.append(tok)
         if not fresh:
             return {"ok": True, "added": 0, "skipped": skipped, "total": job.total}
+        if len(job.tasks) + len(fresh) > MAX_TOKENS_PER_BATCH:
+            return {"ok": False, "added": 0, "skipped": skipped,
+                    "error": f"max {MAX_TOKENS_PER_BATCH} tokens per batch"}
 
-        # id mới phải không đụng id cũ (task có thể đã bị xoá -> t{n} bị trống)
-        used = set(job.tasks.keys())
-        next_index = max((t.index for t in job.tasks.values()), default=-1) + 1
-        new_ids: list[str] = []
-        for k, tok in enumerate(fresh):
-            idx = next_index + k
+        new_tasks: list[Task] = []
+        for tok in fresh:
+            idx = job._next_index
+            job._next_index += 1
             tid = f"t{idx + 1}"
-            while tid in used:
-                idx += 1
-                tid = f"t{idx + 1}"
-            used.add(tid)
             t = Task(task_id=tid, index=idx, token=tok, email=cli.decode_email(tok))
             t.set_steps(cli.steps_for(job.mode))
             job.tasks[tid] = t
             job.order.append(tid)
-            new_ids.append(tid)
+            new_tasks.append(t)
         job.total = len(job.order)
-        was_idle = job.status != "running"
-        if was_idle:
-            job.status = "running"
-            job.finished_at = None
-            job.stop_requested = False
-            job.stop_reason = ""
-
-    # Mở lại file log: job xong thì close_log() đã đặt _log_fh = None, mà log_line()
-    # thoát ngay khi None -> không mở lại là mất sạch log của phần vừa thêm.
-    with job._log_lock:
-        if job._log_fh is None:
-            try:
-                job._log_fh = job.log_path.open("a", encoding="utf-8")
-            except OSError:
-                job._log_fh = None
-
-    proxy_file = DEFAULT_PROXY_FILE
-    if job.proxy_source.startswith("custom proxy pool"):
-        p = STATE_DIR / f"web_proxies_{job_id}.txt"
-        if p.exists():
-            proxy_file = p
-    proxies = cli.load_proxies(proxy_file)
-
-    for tid in new_ids:
-        t = job.tasks.get(tid)
-        if t is None:
-            continue
-        job.emit({"type": "task_init", "task_id": tid, "index": t.index,
-                  "email": t.email, "flow": t.flow, "steps": t.steps, "run": 0})
-    job.emit({"type": "log", "task_id": "*", "line":
-              f"đã thêm {len(new_ids)} acc vào queue (bỏ qua {skipped} acc trùng) — tổng {job.total}"})
-    job.write_results()
-
-    def _run_one_added(tid: str) -> None:
-        t = job.tasks.get(tid)
-        if t is None:
-            return
-        # Task push vào queue vẫn phải chịu lệnh Stop như task chạy đầu. Thiếu
-        # nhánh này thì bấm Stop xong phần vừa push vẫn chạy hết -> job "không dừng".
-        if job.stop_requested:
-            t.status = "stopped"
-            job.emit({"type": "task_done", "task_id": tid, "ok": False,
-                      "status": "STOPPED", "error": "job stopped", "duration_ms": 0})
-            return
-        _run_task_limited(job, t, proxy_file, proxies)
-
-    def _run_added() -> None:
-        try:
-            with ThreadPoolExecutor(max_workers=max(1, min(job.workers, len(new_ids)))) as ex:
-                list(ex.map(_run_one_added, new_ids))
-        except Exception as exc:  # noqa: BLE001 — vòng nền không được chết
-            job.log_line("[append] error: %s" % str(exc)[:160])
-        # Không còn task nào chạy -> đóng job (phần thêm đã xong)
-        with job._lock:
-            still = any(t.status == "running" for t in job.tasks.values())
-        if not still:
-            job.duration_ms = int((time.time() - job._t0) * 1000)
-            job.finished_at = _now()
-            job.status = "stopped" if job.stop_requested else "done"
-            job.emit({"type": "job_done", "job_id": job.job_id, "ok": job.ok, "fail": job.fail,
-                      "done": job.done, "total": job.total, "status": job.status,
-                      "duration_ms": job.duration_ms, "stop_reason": job.stop_reason})
-            job.write_results()
-
-    threading.Thread(target=_run_added, name=f"append-{job_id}", daemon=True).start()
-    return {"ok": True, "added": len(new_ids), "skipped": skipped, "total": job.total}
+        _enqueue_tasks(job, new_tasks)
+        job.emit({"type": "log", "task_id": "*", "line":
+                  f"đã thêm {len(new_tasks)} acc vào queue (bỏ qua {skipped} acc trùng) — tổng {job.total}"})
+        return {"ok": True, "added": len(new_tasks), "skipped": skipped, "total": job.total}
 
 
 def job_stats(job: Job) -> dict:

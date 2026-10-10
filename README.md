@@ -15,6 +15,11 @@ cd upi-checkout/web && python3 app.py     # http://127.0.0.1:8099
 
 → chi tiết ở `web/README.md`.
 
+Dashboard đã có hàng đợi dùng chung cho Run / Append / Retry, 1–200 worker mỗi job,
+tối đa 1.000 task/batch, state riêng giữa các job và giao diện responsive với tìm
+kiếm/chỉ số thời gian thực. Xem [kiểm thử offline](web/README.md#kiểm-thử-offline-không-tạo-giao-dịch)
+để thử hiệu suất và UI mà không tạo giao dịch thật.
+
 ## Cấu trúc
 
 ```

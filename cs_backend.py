@@ -14,13 +14,11 @@ backend boundary the callers need instead:
 * keep token, retry and country settings inside an execution context owned by
   the request.
 
-The protocol implementation remains in ``extract_cs.py``.  This adapter does
-not alter requests, approval handling, response parsing, or retry policy.  A
-process-wide lock is intentional: ``extract_cs`` currently keeps proxy state,
-redaction values and the log sink in module globals.  Running two instances in
-the same interpreter would otherwise mix tokens and write proxy state to the
-wrong file.  The lock is the safe seam until those globals are moved into a
-request context.
+The protocol implementation remains in ``extract_cs.py``. This adapter does
+not alter requests, approval handling, response parsing, or retry policy.
+The execution context stores request configuration and output hooks per thread.
+Callers must provide distinct state directories for independent jobs because
+task indices alone are only unique within a job.
 """
 
 from __future__ import annotations
@@ -83,8 +81,7 @@ class _LineWriter(io.TextIOBase):
         if self._callback is not None:
             self._callback(clean)
 
-# ``extract_cs`` has process-global mutable state (notably _proxy_state and the
-# redaction set).  Serialising in-process calls avoids cross-account leakage.
+# Configuration and output hooks are installed in execution_context below.
 
 def _env_values(token: str, proxy_path: Path, state_file: Path, promo: str,
                 retry_limit: int | None, country: str) -> dict[str, str]:

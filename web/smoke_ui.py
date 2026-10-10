@@ -7,11 +7,12 @@ chỉ curl HTML/JS. Script này mở trang bằng browser thật, chạy 1 job t
 assert DOM — bắt được lỗi runtime mà đọc code không thấy.
 
 Chạy:
-    python3 smoke_ui.py                      # cần server đang chạy ở 127.0.0.1:8099
+    python3 smoke_ui.py                      # tự khởi động backend giả lập offline
     python3 smoke_ui.py --url http://127.0.0.1:9000 --tokens 6
 
 Yêu cầu: pip install playwright  +  chromium (hoặc google-chrome).
-Chỉ dùng token giả -> job fail ở bước checkout 401, KHÔNG tạo giao dịch thật.
+Mặc định dùng tests/preview_server.py: không gọi payment/proxy, không ghi log thật.
+--url chỉ dùng với server kiểm thử riêng; không trỏ vào job/tài khoản thật.
 """
 
 from __future__ import annotations
@@ -98,7 +99,7 @@ async def run(url: str, n_tokens: int, headed: bool, shot: str | None) -> int:
               running: document.getElementById('c-running').textContent,
               queued: document.getElementById('c-queued').textContent,
             },
-            statsRunning: document.getElementById('stat-running').textContent,
+            statsRunning: document.getElementById('runtime-running').textContent,
             overall: document.getElementById('overall-count').textContent,
             // Ô Job ID giờ là <input id="job-id-input"> (điền id để xem lịch sử),
             // không còn <span id="job-id"> như trước.
@@ -267,18 +268,10 @@ def main() -> int:
                 s.bind(("127.0.0.1", 0))
                 port = s.getsockname()[1]
             url = f"http://127.0.0.1:{port}"
-            # Thư mục log RIÊNG cho server test: job test không được rơi vào logs/
-            # thật. Trước đây nó rơi vào đó, mỗi lần chạy để lại một job `total=0`
-            # (bước 7 xoá hết task), và trang tự attach vào job mới nhất nên mở lên
-            # là bảng trống.
-            import tempfile
-            tmp_logs = tempfile.mkdtemp(prefix="upi-smoke-logs-")
-            env = dict(os.environ)
-            env["UPI_WEB_LOG_DIR"] = tmp_logs
+            from pathlib import Path
+            preview = Path(__file__).resolve().parents[1] / "tests" / "preview_server.py"
             proc = subprocess.Popen(
-                [sys.executable, "app.py", "--port", str(port)],
-                cwd=os.path.dirname(os.path.abspath(__file__)),
-                env=env,
+                [sys.executable, str(preview), "--port", str(port), "--demo-tasks", "0"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             for _ in range(60):
                 try:
@@ -289,7 +282,7 @@ def main() -> int:
             else:
                 print("Server test không khởi động được", file=sys.stderr)
                 return 2
-            print(f"Server test riêng: {url}  (log tạm: {tmp_logs})\n")
+            print(f"Server offline riêng: {url}  (backend giả lập, state tạm)\n")
 
         return asyncio.run(run(url, args.tokens, args.headed, args.shot))
     except ImportError:
@@ -302,10 +295,7 @@ def main() -> int:
                 proc.wait(timeout=5)
             except Exception:
                 proc.kill()
-        tmp = locals().get("tmp_logs")
-        if tmp:
-            import shutil
-            shutil.rmtree(tmp, ignore_errors=True)
+                proc.wait()
 
 
 if __name__ == "__main__":

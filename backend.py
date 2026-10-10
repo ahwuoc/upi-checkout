@@ -8,14 +8,11 @@ code is moved behind the same adapter.
 
 CHẾ ĐỘ CHẠY LUỒNG CS (`UPI_WEB_CS_MODE`):
   • `subprocess` (mặc định) — mỗi task một tiến trình `extract_cs.py` (qua
-    `cli.cs_subprocess_one`). Đây là đường CLI vẫn dùng, và là đường DUY NHẤT
-    chạy song song thật.
+    `cli.cs_subprocess_one`), cô lập bộ nhớ giữa các task.
   • `inprocess` — gọi `cs_backend.run_in_process`, chạy trong chính process web.
-    Đường này bị `cs_backend._RUN_LOCK` khoá suốt flow CS (vì `extract_cs` có
-    state toàn cục) nên **mỗi lúc chỉ 1 task CS chạy được**, dù đặt workers=20:
-    đo thật job 100 task thấy 20 task "đang chạy" nhưng 13 con đứng im ở bước
-    `runner` suốt 7 phút, chỉ 5 task xong -> throughput ~1 task/100s, tức 100
-    task mất ~5,5 giờ thay vì ~17 phút. Giữ lại chỉ để so sánh/rollback.
+    Bản hiện tại dùng thread-local execution_context, không còn `_RUN_LOCK`.
+  Giới hạn số task đồng thời do executor trong web/engine.py quản lý; mỗi job
+  truyền một state_dir riêng cho cả hai chế độ. Mặc định backend không thay đổi.
 """
 
 from __future__ import annotations
@@ -106,7 +103,7 @@ def _run_cs_subprocess(request: BackendRequest, hooks: BackendHooks) -> dict:
 
 
 def _run_cs_inprocess(request: BackendRequest, hooks: BackendHooks) -> dict:
-    """Đường cũ: chạy trong process web, bị khoá tuần tự bởi `_RUN_LOCK`."""
+    """Chạy trong process web với execution context riêng cho từng request."""
     hooks.step("runner", "active")
 
     def on_line(line: str) -> None:
