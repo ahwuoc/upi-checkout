@@ -586,7 +586,7 @@ body[data-filter="success"][data-view="grid"] .task-bar { display: none; }
 body[data-filter="success"][data-view="grid"] .success-result:not([hidden]) {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-areas: "qr" "link" "amount" "status" "tools";
+  grid-template-areas: "qr" "link" "amount" "plus" "status" "tools";
   gap: 0;
   padding: 0;
   background: var(--surface);
@@ -614,6 +614,10 @@ body[data-filter="success"][data-view="grid"] .success-field:nth-child(3) {
 /* Trước đây chế độ lưới ép link xuống dòng (white-space: normal) -> URL dài 700 ký
    tự chiếm 4–5 dòng, card cao vống. Giờ giữ 1 dòng cho cả 2 chế độ. */
 body[data-filter="success"][data-view="grid"] .success-field:nth-child(4) { grid-area: amount; padding: 0 16px 14px; }
+/* Ô "Upgrade" (check Plus) phải có grid-area riêng: .success-fields là `display: contents`
+   nên mọi field đều thành grid item, field nào không được đặt vị trí sẽ bị auto-place
+   lên ĐẦU card (đúng lỗi đã thấy). Đặt sau `amount`, cùng padding với các field khác. */
+body[data-filter="success"][data-view="grid"] .success-plus-field { grid-area: plus; padding: 0 16px 14px; }
 body[data-filter="success"][data-view="grid"] .success-card-status { display: inline-flex; grid-area: status; justify-self: start; margin: 0 16px 14px; }
 body[data-filter="success"][data-view="grid"] .success-stripe-field { display: none; }
 body[data-filter="success"][data-view="grid"] .task-detail { padding: 16px; }
