@@ -2123,6 +2123,12 @@ function applySnapshot(data) {
     t.linkZero = !!td.link_zero;
     t.linkFlipAt = td.link_flip_at || 0;
     t.linkNote = td.link_note || '';
+    // Kết luận Plus cũng phải đọc từ snapshot: chỉ nhận qua event `task_plus` thì
+    // F5 xong badge biến mất, mà khi đã dò xong (plus/not_plus) thì không còn event
+    // nào để vẽ lại — badge mất vĩnh viễn.
+    t.plusState = td.plus_state || '';
+    t.plusNote = td.plus_note || '';
+    t.plusCheckedAt = td.plus_checked_at || 0;
     t.created_at = td.created_at || null;
     t.updated_at = td.updated_at || null;
     t.logs = Array.isArray(td.logs) ? td.logs.slice() : [];
