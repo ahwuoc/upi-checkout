@@ -67,7 +67,7 @@ class RunRequest(BaseModel):
     country: str = "IN"
     promo: str = "off"
     workers: int = Field(default=4, ge=1, le=engine.MAX_WORKERS)
-    retries: int = Field(default=3, ge=0, le=5)
+    retries: int = Field(default=3, ge=1, le=5)
     proxies: str | None = None
 
 

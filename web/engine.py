@@ -1498,12 +1498,15 @@ def _reset_task_for_retry(job: Job, task: Task) -> None:
 
 def _run_with_retries(job: Job, task: Task, proxy_file: Path,
                       proxies: list[str]) -> None:
-    for retry in range(job.retries + 1):
+    # `job.retries` = số lần chạy TỐI ĐA cho mỗi acc, không phải số lần thử lại.
+    # Đặt 3 -> chạy lần 1, 2, 3 rồi dừng, KHÔNG bao giờ tới lần 4 (trước đây là
+    # `range(retries + 1)` nên đặt 3 lại chạy 4 lần — gây nhầm khi đọc "Run 4").
+    for attempt in range(max(1, job.retries)):
         if job.stop_requested:
             if task.status == "pending":
                 _finish(job, task, {"status": "STOPPED", "err": "job stopped"}, time.time())
             break
-        if retry:
+        if attempt:
             if task.no_retry:
                 # Account đã bị Stripe gắn cờ (risk decline): chạy lại chỉ tốn thêm
                 # ~2 phút + 1 checkout nữa rồi cũng decline y hệt.

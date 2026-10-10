@@ -57,7 +57,7 @@ def main():
             import uvicorn
             if args.demo_tasks:
                 engine.start_job([fake_token(i) for i in range(args.demo_tasks)],
-                                 "cs", "IN", "off", 8, None, retries=0)
+                                 "cs", "IN", "off", 8, None, retries=1)
             print("OFFLINE PREVIEW — no real checkout or payment requests", flush=True)
             try:
                 uvicorn.run(app.app, host="127.0.0.1", port=args.port, log_level="warning")

@@ -101,9 +101,9 @@
             <span class="helper">Only applies to eligible accounts. Check the final amount in the results.</span>
           </div>
           <div class="field">
-            <label for="retries">Retries on failure</label>
-            <input id="retries" type="number" value="3" min="0" max="5">
-            <span class="helper">0 = no retry. Retries for the same account run sequentially and can increase processing time.</span>
+            <label for="retries">Max runs per account</label>
+            <input id="retries" type="number" value="3" min="1" max="5">
+            <span class="helper">3 = run the account up to 3 times, then stop (never a 4th). Extra runs reuse the same account with a new device_id + proxy session, run sequentially.</span>
           </div>
         </div>
       </details>

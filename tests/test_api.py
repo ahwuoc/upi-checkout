@@ -49,11 +49,11 @@ class ApiRequestTests(unittest.TestCase):
         job = SimpleNamespace(job_id="abcdef123456", total=2)
         with patch.object(engine, "start_job", return_value=job) as start:
             req = web_app.RunRequest(tokens='["one", {"token":"two"}]', mode="cs",
-                                     country="IN", promo="off", workers=16, retries=0,
+                                     country="IN", promo="off", workers=16, retries=1,
                                      proxies="offline proxy fixture")
             self.assertEqual(web_app.api_run(req), {"job_id": job.job_id, "total": 2})
         start.assert_called_once_with(["one", "two"], "cs", "IN", "off", 16,
-                                      "offline proxy fixture", 0)
+                                      "offline proxy fixture", 1)
 
     def test_invalid_run_never_reaches_engine(self):
         with patch.object(engine, "start_job") as start:
@@ -65,10 +65,10 @@ class ApiRequestTests(unittest.TestCase):
 
     def test_worker_and_retry_bounds_are_validated(self):
         for values in ({"workers": 0}, {"workers": engine.MAX_WORKERS + 1},
-                       {"retries": -1}, {"retries": 6}):
+                       {"retries": 0}, {"retries": 6}):
             with self.subTest(values=values), self.assertRaises(ValidationError):
                 web_app.RunRequest(tokens="one", **values)
-        self.assertEqual(web_app.RunRequest(workers=engine.MAX_WORKERS, retries=0).workers,
+        self.assertEqual(web_app.RunRequest(workers=engine.MAX_WORKERS, retries=1).workers,
                          engine.MAX_WORKERS)
 
     def test_engine_validation_becomes_client_error(self):

@@ -20,6 +20,7 @@ const state = {
   filter: 'all', // tab đang chọn: all | running | queued | success | fail
   search: '',
   workers: 0,
+  retries: 0,   // số lần chạy tối đa mỗi acc (để hiện 'Run 3 / 3')
   elapsedMs: 0,
   elapsedAt: 0,
   jobStatus: '',
@@ -1199,6 +1200,16 @@ document.addEventListener('dblclick', (ev) => {
 
 
 
+// Nhãn số lần chạy: 'Run 3 / 3' khi job cho chạy nhiều lần, chỉ 'Run 1' khi chạy 1 lần.
+// Trước đây chỉ ghi 'Run 3' nên khó biết đó là lần cuối hay còn lượt nữa.
+function runLabel(t) {
+  const n = t.run || 1;
+  // Job chạy bằng code CŨ (retries = số lần thử lại) có thể đã tới lần 4 trong khi
+  // cấu hình ghi 3 -> lấy max của hai giá trị để nhãn không bao giờ hiện 'Run 4 / 3'.
+  const max = Math.max(state.retries || 0, n);
+  return 'Run ' + n + (max > 1 ? ' / ' + max : '');
+}
+
 function renderRow(t) {
   if (!t.el) return;
   t.el.wrap.dataset.status = t.status;
@@ -1387,14 +1398,14 @@ function renderDetail(t) {
     '<div class="detail-section">' +
       '<div class="detail-section-title">Task execution</div>' +
       '<div class="exec-row">' + chipHtml(t) + '<span class="muted">' + dur + '</span>' +
-        '<span class="run-label">Run ' + (t.run || 1) + '</span></div>' +
+        '<span class="run-label">' + runLabel(t) + '</span></div>' +
       errHtml +
     '</div>' +
     '<div class="progress-section">' +
       '<div class="progress-head"><span class="muted">Overall progress</span><span class="pct">' + pct + '%</span></div>' +
       '<div class="progressbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '">' +
         '<div class="fill" style="width:' + pct + '%"></div></div>' +
-      '<div class="muted steps-line">' + finished + ' / ' + t.steps.length + ' steps complete · Run ' + (t.run || 1) + '</div>' +
+      '<div class="muted steps-line">' + finished + ' / ' + t.steps.length + ' steps complete · ' + runLabel(t) + '</div>' +
     '</div>' +
     flowCardHtml(t) +
     '<div class="step-grid">' + stepsHtml + '</div>' +
@@ -1913,6 +1924,7 @@ function onJobStart(evt) {
   state.stopping = false;
   state.jobStatus = 'running';
   state.workers = evt.workers || state.workers;
+  if (evt.retries) state.retries = evt.retries;
   state.elapsedMs = evt.elapsed_ms || 0;
   state.elapsedAt = Date.now();
   setJobBadge(state.jobId);
@@ -2180,6 +2192,7 @@ function applySnapshot(data) {
   state.running = data.status === 'running';
   state.jobStatus = data.status || '';
   state.workers = data.workers || state.workers;
+  if (data.retries) state.retries = data.retries;
   state.elapsedMs = data.elapsed_ms ?? data.duration_ms ?? 0;
   state.elapsedAt = Date.now();
   state.stopping = !!data.stop_requested && state.running;
@@ -2286,7 +2299,7 @@ async function runJob() {
   const workers = w.value;
   if (w.clamped) toast('Worker limit is ' + MAX_WORKERS + ' — you entered ' + w.raw + '.');
   const retriesInput = parseInt(els.retries.value, 10);
-  const retries = Math.max(0, Math.min(5, Number.isNaN(retriesInput) ? 3 : retriesInput));
+  const retries = Math.max(1, Math.min(5, Number.isNaN(retriesInput) ? 3 : retriesInput));
   const payload = {
     tokens: tokens.join('\n'),
     mode: state.mode,
