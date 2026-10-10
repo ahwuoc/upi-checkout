@@ -21,9 +21,9 @@
   --blue: #8bbff1;
   --blue-soft: #1b2e42;
   --blue-border: #385570;
-  --green: #7fd1a7;
-  --green-soft: #1b3028;
-  --green-border: #365943;
+  --green: #3ddc84;
+  --green-soft: #123125;
+  --green-border: #2e6b4a;
   --red: #f19ca5;
   --red-soft: #342328;
   --red-border: #68414a;
@@ -586,7 +586,7 @@ body[data-filter="success"][data-view="grid"] .task-bar { display: none; }
 body[data-filter="success"][data-view="grid"] .success-result:not([hidden]) {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-areas: "qr" "link" "amount" "plus" "status" "tools";
+  grid-template-areas: "qr" "link" "chips";
   gap: 0;
   padding: 0;
   background: var(--surface);
@@ -613,13 +613,50 @@ body[data-filter="success"][data-view="grid"] .success-field:nth-child(3) {
 }
 /* Trước đây chế độ lưới ép link xuống dòng (white-space: normal) -> URL dài 700 ký
    tự chiếm 4–5 dòng, card cao vống. Giờ giữ 1 dòng cho cả 2 chế độ. */
-body[data-filter="success"][data-view="grid"] .success-field:nth-child(4) { grid-area: amount; padding: 0 16px 14px; }
-/* Ô "Upgrade" (check Plus) phải có grid-area riêng: .success-fields là `display: contents`
-   nên mọi field đều thành grid item, field nào không được đặt vị trí sẽ bị auto-place
-   lên ĐẦU card (đúng lỗi đã thấy). Đặt sau `amount`, cùng padding với các field khác. */
-body[data-filter="success"][data-view="grid"] .success-plus-field { grid-area: plus; padding: 0 16px 14px; }
-body[data-filter="success"][data-view="grid"] .success-card-status { display: inline-flex; grid-area: status; justify-self: start; margin: 0 16px 14px; }
-body[data-filter="success"][data-view="grid"] .success-stripe-field { display: none; }
+/* Chế độ lưới = card gọn: số tiền lên header, trạng thái + Plus + đếm ngược + nút icon
+   gộp vào một hàng ở chân card. Các khối có nhãn của chế độ danh sách được ẩn đi vì
+   thông tin đã nằm ở header/chip (bỏ ô Amount to, bỏ dòng "Upgrade", bỏ chip
+   "Link created", bỏ hàng nút AT cũ). */
+body[data-filter="success"][data-view="grid"] .success-card-status,
+body[data-filter="success"][data-view="grid"] .success-amount-field,
+body[data-filter="success"][data-view="grid"] .success-plus-field,
+body[data-filter="success"][data-view="grid"] .card-tools { display: none; }
+/* Hàng chân card gọn + số tiền trên header chỉ dùng ở chế độ lưới; chế độ danh sách
+   đã có ô Amount và các field có nhãn riêng (xem khối [data-view="grid"]). */
+.success-footer { display: none; }
+.task-amount { display: none; }
+body[data-filter="success"][data-view="grid"] .success-stripe-field,
+body[data-filter="success"][data-view="grid"] .success-open { display: none; }
+body[data-filter="success"][data-view="grid"] .success-footer {
+  display: flex;
+  grid-area: chips;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 16px 14px;
+}
+/* Một hàng duy nhất: chip bên trái (tự co + cắt đuôi khi hẹp), icon ghim bên phải.
+   Không wrap -> icon không bị rớt xuống dòng dưới như trước. */
+body[data-filter="success"][data-view="grid"] .success-footer .chip {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+body[data-filter="success"][data-view="grid"] .success-foot-expiry { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+body[data-filter="success"][data-view="grid"] .success-foot-tools { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+body[data-filter="success"][data-view="grid"] .success-footer .card-tool { min-height: 28px; padding: 4px 8px; }
+/* Header card gọn: email bên trái, "UPI · ₹0.00" bên phải (trước nút mở chi tiết). */
+body[data-filter="success"][data-view="grid"] .task-row-top { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+body[data-filter="success"][data-view="grid"] .task-amount {
+  display: inline-flex;
+  grid-column: 3;
+  align-items: center;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+body[data-filter="success"][data-view="grid"] .task-toggle { grid-column: 4; }
 body[data-filter="success"][data-view="grid"] .task-detail { padding: 16px; }
 body[data-filter="success"][data-view="grid"] .detail-head { align-items: stretch; flex-direction: column; }
 body[data-filter="success"][data-view="grid"] .step-grid { grid-template-columns: 1fr; }
@@ -820,7 +857,7 @@ body[data-filter="success"][data-view="grid"] .step-grid { grid-template-columns
   body[data-filter="success"]:not([data-view="grid"]) .success-result:not([hidden]) { grid-template-columns: minmax(0, 1fr); gap: 20px; padding: 16px; }
   body[data-filter="success"]:not([data-view="grid"]) .success-result:not([hidden]) .success-qr-link { grid-area: 2 / 1; }
   .success-fields { grid-template-columns: minmax(0, 1fr); gap: 16px; }
-  body[data-filter="success"][data-view="grid"] .task-toggle { grid-column: 3; }
+  body[data-filter="success"][data-view="grid"] .task-toggle { grid-column: 4; }
   .egress-row { flex-wrap: wrap; gap: 4px 8px; font-size: 11px; }
   .egress-row span:last-child { text-align: left; }
   .empty-state h2 { font-size: 20px; }
@@ -929,15 +966,6 @@ body[data-filter="success"][data-view="grid"] .step-grid { grid-template-columns
 
 /* Compact result-card actions. */
 .card-tools { display: none; }
-body[data-filter="success"][data-view="grid"] .card-tools {
-  display: flex;
-  grid-area: tools;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 5px;
-  padding: 12px 16px;
-  border-top: 1px solid var(--border);
-}
 body[data-filter="success"][data-view="grid"] .card-tool {
   display: inline-flex;
   align-items: center;

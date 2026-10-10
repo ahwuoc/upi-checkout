@@ -365,6 +365,23 @@ function chipFor(t) {
   return byProbe[st] || ['Awaiting payment', 'chip-amber'];
 }
 
+// Nhãn chip trạng thái ở hàng chân card (chế độ lưới — kiểu card gọn). Ngắn, khớp
+// cách gọi trong bản thiết kế: "Payment successful" / "Awaiting payment".
+const CHIP_STATE = {
+  succeeded: ['Payment successful', 'chip-green'],
+  waiting: ['Awaiting payment', 'chip-amber'],
+  failed: ['Failed', 'chip-red'],
+  canceled: ['Cancelled', 'chip-red'],
+  expired: ['Expired', 'chip-amber'],
+};
+// Nhãn chip Plus ở cùng hàng. Chưa duyệt mandate thì KHÔNG có chip này (đúng như
+// thiết kế: card "Awaiting payment" không hiện gì về Plus).
+const CHIP_PLUS = {
+  plus: ['Plus subscription confirmed', 'chip-green'],
+  checking: ['Checking Plus…', 'chip-amber'],
+  not_plus: ['Not Plus', 'chip-gray'],
+};
+
 function setChip(t) {
   if (!t.el) return;
   const [label, cls] = chipFor(t);
@@ -377,6 +394,13 @@ function setChip(t) {
   if (t.el.successCardStatus) {
     t.el.successCardStatus.textContent = 'Link created';
     t.el.successCardStatus.className = 'success-card-status chip ' + cls;
+  }
+  // Chip ở hàng chân card (chế độ lưới) thì nói thẳng TRẠNG THÁI LINK — trùng ý với
+  // chip hàng nên chỉ hiện ở chế độ lưới (CSS ẩn ở danh sách).
+  if (t.el.footState) {
+    const [stateLabel, stateCls] = CHIP_STATE[t.linkState || ''] || ['Link created', cls];
+    t.el.footState.textContent = stateLabel;
+    t.el.footState.className = 'chip success-chip-state ' + stateCls;
   }
 }
 
@@ -528,6 +552,13 @@ function flushRender() {
 const CARD_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true">'
   + '<rect x="9" y="9" width="11" height="11" rx="2"/>'
   + '<path d="M5 15V5.5A1.5 1.5 0 0 1 6.5 4H15"/></svg>';
+// Icon cho hàng chân card ở chế độ lưới (xem .success-footer).
+const LINK_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true">'
+  + '<path d="M10.5 13.5a4 4 0 0 0 5.7 0l2.6-2.6a4 4 0 0 0-5.7-5.7l-1.1 1.1"/>'
+  + '<path d="M13.5 10.5a4 4 0 0 0-5.7 0l-2.6 2.6a4 4 0 0 0 5.7 5.7l1.1-1.1"/></svg>';
+const OPEN_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true">'
+  + '<path d="M14 4h6v6"/><path d="M20 4l-8 8"/>'
+  + '<path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>';
 
 function createTaskEl(t) {
   const wrap = document.createElement('div');
@@ -542,6 +573,9 @@ function createTaskEl(t) {
       // để đối chiếu kết quả về đúng dòng AT nào.
       '<span class="task-idx mono"></span>' +
       '<button type="button" class="task-email" title="Copy email"></button>' +
+      // Số tiền nằm ở header CHỈ trong chế độ lưới (card gọn kiểu "UPI · ₹0.00") —
+      // ngoài ra ẩn, vì chế độ danh sách đã có ô Amount riêng.
+      '<span class="task-amount mono" hidden></span>' +
       '<span class="task-pct"></span>' +
       '<span class="chip chip-gray"></span>' +
       '<button type="button" class="task-remove" aria-label="Remove task" title="Remove this task (also deletes the server copy)">✕</button>' +
@@ -597,6 +631,22 @@ function createTaskEl(t) {
         '<button type="button" class="card-tool card-copyat" title="Copy access token">' +
           CARD_ICON + '<span>AT</span></button>' +
       '</div>' +
+      // Hàng chân card cho chế độ lưới (card gọn): chip trạng thái + chip Plus +
+      // đếm ngược + nút icon. Ẩn hoàn toàn ở chế độ danh sách — ở đó thông tin
+      // đã có dạng field có nhãn.
+      '<div class="success-footer">' +
+        '<span class="chip chip-gray success-chip-state">Link created</span>' +
+        '<span class="chip chip-blue success-chip-plus" hidden></span>' +
+        '<span class="success-foot-expiry"></span>' +
+        '<span class="success-foot-tools">' +
+          '<button type="button" class="card-tool card-copylink" title="Copy payment link">' +
+            LINK_ICON + '<span></span></button>' +
+          '<button type="button" class="card-tool card-openlink" title="Open payment link">' +
+            OPEN_ICON + '<span></span></button>' +
+          '<button type="button" class="card-tool card-copyat" title="Copy access token">' +
+            CARD_ICON + '<span></span></button>' +
+        '</span>' +
+      '</div>' +
     '</div>' +
     '<a class="success-qr-link" target="_blank" rel="noopener noreferrer" download>' +
       '<img class="success-qr" alt="QR UPI" loading="lazy">' +
@@ -641,6 +691,10 @@ function createTaskEl(t) {
     successPlusField: successResult.querySelector('.success-plus-field'),
     successPlus: successResult.querySelector('.success-plus'),
     successCardStatus: successResult.querySelector('.success-card-status'),
+    taskAmount: row.querySelector('.task-amount'),
+    footState: successResult.querySelector('.success-chip-state'),
+    footPlus: successResult.querySelector('.success-chip-plus'),
+    footExpiry: successResult.querySelector('.success-foot-expiry'),
     successStripeField: successResult.querySelector('.success-stripe-field'),
     successStripe: successResult.querySelector('.success-stripe'),
     successQrLink: successResult.querySelector('.success-qr-link'),
@@ -1185,6 +1239,12 @@ function renderRow(t) {
     t.el.cardCopyAt.dataset.token = token;
     t.el.cardCopyAt.disabled = !token;
   }
+  // Nút copy AT ở hàng chân card (chế độ lưới) là bản thứ hai -> phải gán token cho
+  // MỌI nút, không chỉ nút đầu tiên.
+  for (const btn of t.el.wrap.querySelectorAll('.card-tool.card-copyat')) {
+    btn.dataset.token = token;
+    btn.disabled = !token;
+  }
   if (t.el.successCopyAt) {
     t.el.successCopyAt.dataset.token = token;
     t.el.successCopyAt.disabled = !token;
@@ -1198,6 +1258,17 @@ function renderRow(t) {
   // 金额和到期时间在落盘的 artifact 里都是 null（cs 流程不写这两个字段），
   // 只能现抓指引页。抓到之后 startMonitor 会每 20 秒回访一次。
   applyProbe(t, t.probe);
+  // Chế độ lưới: số tiền lên header ("UPI · ₹0.00") và đếm ngược xuống hàng chân
+  // card, để card gọn không phải có ô Amount đứng riêng.
+  if (t.el.taskAmount) {
+    const amt = a.amount_minor != null ? fmtAmount(a.amount_minor) : '';
+    t.el.taskAmount.textContent = amt ? ('UPI · ' + amt) : '';
+    t.el.taskAmount.hidden = !amt;
+  }
+  if (t.el.footExpiry) {
+    const ex = t.el.successExpiry;
+    t.el.footExpiry.textContent = (ex && !ex.hidden) ? ex.textContent : '';
+  }
   if (t.probe) {
     startMonitor(t);
   } else {
@@ -1233,6 +1304,16 @@ function renderPlus(t) {
   const e = t.el;
   if (!e || !e.successPlusField) return;
   const state = t.plusState || '';
+  // Chip Plus ở hàng chân card (chỉ hiện ở chế độ lưới). Chưa duyệt mandate thì không
+  // có chip — giống thiết kế card gọn.
+  if (e.footPlus) {
+    const row = CHIP_PLUS[state];
+    e.footPlus.hidden = !row;
+    if (row) {
+      e.footPlus.textContent = row[0];
+      e.footPlus.className = 'chip success-chip-plus ' + row[1];
+    }
+  }
   if (!state) {
     // Chưa có gì để kết luận. Chỉ hiện dòng chờ khi task ĐÃ có link — để thấy tính
     // năng check Plus nằm ở đâu thay vì tưởng là thiếu: việc dò chỉ bắt đầu SAU khi
