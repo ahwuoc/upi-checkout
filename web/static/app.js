@@ -377,7 +377,7 @@ const CHIP_STATE = {
 // Nhãn chip Plus ở cùng hàng. Chưa duyệt mandate thì KHÔNG có chip này (đúng như
 // thiết kế: card "Awaiting payment" không hiện gì về Plus).
 const CHIP_PLUS = {
-  plus: ['Plus subscription confirmed', 'chip-green'],
+  plus: ['Plus Success', 'chip-green'],
   checking: ['Checking Plus…', 'chip-amber'],
   not_plus: ['Not Plus', 'chip-gray'],
 };

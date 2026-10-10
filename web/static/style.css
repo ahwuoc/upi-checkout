@@ -631,17 +631,21 @@ body[data-filter="success"][data-view="grid"] .success-footer {
   display: flex;
   grid-area: chips;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 2px 16px 14px;
 }
-/* Một hàng duy nhất: chip bên trái (tự co + cắt đuôi khi hẹp), icon ghim bên phải.
-   Không wrap -> icon không bị rớt xuống dòng dưới như trước. */
+/* Chip và nút icon đều KHÔNG được co giãn (nhãn chip giữ nguyên chữ), và cho phép
+   xuống dòng: card hẹp (~280px) thì 2 chip đã chiếm hết hàng nên icon xuống hàng dưới
+   (ghim phải) — trước đây khoá 1 hàng nên icon bị đẩy TRÀN RA NGOÀI card. */
 body[data-filter="success"][data-view="grid"] .success-footer .chip {
+  flex: 0 0 auto;
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+body[data-filter="success"][data-view="grid"] .success-foot-tools { flex: 0 0 auto; }
 body[data-filter="success"][data-view="grid"] .success-foot-expiry { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 body[data-filter="success"][data-view="grid"] .success-foot-tools { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
 body[data-filter="success"][data-view="grid"] .success-footer .card-tool { min-height: 28px; padding: 4px 8px; }
