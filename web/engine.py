@@ -500,9 +500,13 @@ def _monitor_one(job: Job, task: Task) -> None:
         _start_plus_check(job, task)
 
 
-# Nhịp dò Plus sau khi khách duyệt mandate: dò ngay rồi thưa dần. Khách thường trả
-# tiền trong vài phút; 6 lần trong ~25 phút là đủ mà không tốn proxy vô hạn.
-PLUS_CHECK_DELAYS = (0, 60, 180, 300, 600, 900)
+# Nhịp dò Plus sau khi khách duyệt mandate: 30 giây một lần, tối đa 30 phút.
+# Dò thưa hơn thì phát hiện muộn (khách thường trả tiền trong vài phút); dò dày hơn
+# thì tốn proxy vô ích. Đổi được bằng env mà không phải sửa code:
+#   UPI_PLUS_CHECK_SECS=30  UPI_PLUS_CHECK_MAX_SECS=1800
+PLUS_CHECK_EVERY_SECS = max(1, int(float(os.environ.get("UPI_PLUS_CHECK_SECS", "30") or 30)))
+PLUS_CHECK_MAX_SECS = max(0, int(float(os.environ.get("UPI_PLUS_CHECK_MAX_SECS",
+                                                      str(30 * 60)) or 1800)))
 
 
 def _start_plus_check(job: Job, task: Task) -> None:
@@ -526,32 +530,42 @@ def _plus_check_loop(job: Job, task: Task, token: str, proxy: str) -> None:
         with job._lock:
             task.plus_state = "not_plus"
         return
-    for delay in PLUS_CHECK_DELAYS:
-        if delay:
-            time.sleep(delay)
+    # Dò NGAY lần đầu, rồi cách nhau đúng PLUS_CHECK_EVERY_SECS cho tới khi hết hạn
+    # dò. (Trước đây lặp qua danh sách mốc rồi `sleep(mốc)` -> các mốc bị CỘNG DỒN,
+    # nhịp thật thưa dần chứ không phải cách đều.)
+    deadline = time.monotonic() + PLUS_CHECK_MAX_SECS
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             res = at_check.check(token, proxy)
         except Exception as exc:  # noqa: BLE001 — vòng nền không được chết
             job.log_line("[%s] plus: loi khi kiem tra (%s)" % (task.task_id, str(exc)[:120]))
-            continue
-        plus = bool(res.get("plus"))
-        with job._lock:
-            task.plus_checked_at = int(time.time())
-            task.plus_note = str(res.get("note") or "")
-            task.plus_state = "plus" if plus else "checking"
-        job.emit({"type": "task_plus", "task_id": task.task_id,
-                  "plus_state": task.plus_state, "plus_note": task.plus_note,
-                  "plus_checked_at": task.plus_checked_at})
-        if plus:
-            job.log_line("[%s] plus: DA LEN PLUS (%s)" % (task.task_id, task.plus_note))
-            return
+            res = None
+        if res is not None:
+            plus = bool(res.get("plus"))
+            with job._lock:
+                task.plus_checked_at = int(time.time())
+                task.plus_note = str(res.get("note") or "")
+                task.plus_state = "plus" if plus else "checking"
+            job.emit({"type": "task_plus", "task_id": task.task_id,
+                      "plus_state": task.plus_state, "plus_note": task.plus_note,
+                      "plus_checked_at": task.plus_checked_at})
+            if plus:
+                job.log_line("[%s] plus: DA LEN PLUS sau %d lan do (%s)"
+                             % (task.task_id, attempt, task.plus_note))
+                return
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        time.sleep(min(PLUS_CHECK_EVERY_SECS, left))
     with job._lock:
         if task.plus_state == "checking":
             task.plus_state = "not_plus"
     job.emit({"type": "task_plus", "task_id": task.task_id, "plus_state": "not_plus",
               "plus_note": task.plus_note, "plus_checked_at": task.plus_checked_at})
-    job.log_line("[%s] plus: chua len Plus sau %d lan do (%s)"
-                 % (task.task_id, len(PLUS_CHECK_DELAYS), task.plus_note))
+    job.log_line("[%s] plus: chua len Plus sau %d lan do trong %ds (%s)"
+                 % (task.task_id, attempt, PLUS_CHECK_MAX_SECS, task.plus_note))
 
 
 def _link_monitor_loop() -> None:
