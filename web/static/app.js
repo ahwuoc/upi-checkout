@@ -1130,6 +1130,10 @@ document.addEventListener('click', async (ev) => {
     em.classList.remove('copied', 'copyfail');
     void em.offsetWidth;
     em.classList.add(okEm ? 'copied' : 'copyfail');
+    // Hậu tố "✓ copied" của .task-email là ::after nằm TRONG nút, mà nút bị cắt bằng
+    // text-overflow: ellipsis + overflow: hidden -> email dài là hậu tố bị cắt mất,
+    // không thấy gì. Nên phải báo bằng toast.
+    toast(okEm ? ('Copied ' + text) : 'Copy failed — try again');
     setTimeout(() => em.classList.remove('copied', 'copyfail'), 1400);
     return;
   }
