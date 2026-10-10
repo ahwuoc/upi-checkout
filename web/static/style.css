@@ -527,6 +527,14 @@ body[data-filter="success"]:not([data-view="grid"]) .success-result:has(.success
 .success-verdict.bad { color: var(--red); }
 .success-verdict.warn { color: var(--amber); }
 .success-verdict.wait { color: var(--blue); }
+/* Kết luận acc đã lên Plus chưa (server dò bằng AT của acc — at_check.py).
+   Màu theo trạng thái để liếc qua là biết: xanh = đã lên, xám = chưa,
+   vàng = đang dò, mờ = chưa có gì để dò (khách chưa duyệt mandate). */
+.success-plus { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.success-plus.is-plus { color: var(--green); }
+.success-plus.is-not_plus { color: var(--muted); font-weight: 500; }
+.success-plus.is-checking { color: var(--amber); }
+.success-plus.is-waiting { color: var(--subtle); font-weight: 400; }
 /* 整张卡按状态描边，扫一眼就知道哪些成了 */
 .success-result[data-status] { position: relative; }
 .success-result[data-status="succeeded"] { box-shadow: inset 3px 0 0 var(--green); }

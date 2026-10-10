@@ -1233,8 +1233,22 @@ function renderPlus(t) {
   const e = t.el;
   if (!e || !e.successPlusField) return;
   const state = t.plusState || '';
-  e.successPlusField.hidden = !state;
-  if (!state) return;
+  if (!state) {
+    // Chưa có gì để kết luận. Chỉ hiện dòng chờ khi task ĐÃ có link — để thấy tính
+    // năng check Plus nằm ở đâu thay vì tưởng là thiếu: việc dò chỉ bắt đầu SAU khi
+    // khách duyệt mandate (link_state = succeeded). Link chưa ai quét thì ẩn hẳn.
+    const hasLink = !!(t.artifact && (t.artifact.upi_link || t.artifact.qr_png));
+    e.successPlusField.hidden = !hasLink;
+    if (!hasLink) return;
+    e.successPlus.textContent = 'Waiting for mandate';
+    e.successPlus.className = 'success-plus is-waiting';
+    e.successPlus.title = (t.linkState === 'failed' || t.linkState === 'expired'
+      || t.linkState === 'canceled')
+      ? 'No mandate was approved on this link — nothing to check'
+      : 'Starts polling the account AT once the customer approves the mandate';
+    return;
+  }
+  e.successPlusField.hidden = false;
   e.successPlus.textContent = state === 'plus' ? 'Plus ✓'
     : state === 'checking' ? 'Checking AT…'
     : 'Not Plus';
