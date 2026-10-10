@@ -673,7 +673,7 @@ function createTaskEl(t) {
 // 这里 succeeded 是**最好的结果** —— 客户成功签了委托。判据混用会把成功链报成死链。
 const STATUS_UI = {
   waiting: ['⏳ Waiting for customer to scan', 'wait'],
-  succeeded: ['✅ Customer approved the mandate', 'ok'],
+  succeeded: ['Customer approved the mandate ✓', 'ok'],
   failed: ['❌ Failed — Stripe declined', 'bad'],
   canceled: ['⛔ Cancelled', 'bad'],
   expired: ['⌛ Expired — never scanned', 'warn'],
