@@ -360,7 +360,7 @@ def geo_billing_via_module(proxy: str) -> dict[str, Any]:
         os.environ.setdefault("UPI_STATE_DIR", str(SCRIPT_DIR / "cs_state"))
         import geobilling  # noqa: PLC0415 — import muộn: chỉ nạp khi thật sự dùng
     except Exception as exc:  # noqa: BLE001
-        log(f"geobilling không nạp được: {str(exc)[:90]}", "[WARN] ")
+        log(f"geobilling failed to load: {str(exc)[:90]}", "[WARN] ")
         return {}
 
     try:
@@ -368,7 +368,7 @@ def geo_billing_via_module(proxy: str) -> dict[str, Any]:
             proxy_url_for_requests(proxy), country="IN",
             log=lambda m: log(str(m).strip()))
     except Exception as exc:  # noqa: BLE001
-        log(f"geobilling lỗi: {str(exc)[:90]}", "[WARN] ")
+        log(f"geobilling error: {str(exc)[:90]}", "[WARN] ")
         return {}
     if not addr:
         return {}
@@ -378,7 +378,7 @@ def geo_billing_via_module(proxy: str) -> dict[str, Any]:
     # TN/TN/DL), nên quy về mã; không map được thì bỏ để nơi gọi fallback.
     code = state_code_in(addr.get("state") or "", "")
     if not code:
-        log("geobilling trả state %r không map được sang mã -> fallback"
+        log("geobilling returned state %r with no matching state code -> falling back"
             % (addr.get("state") or "?"), "[WARN] ")
         return {}
 
@@ -413,7 +413,7 @@ def geo_billing_from_proxy(proxy: str) -> dict[str, Any]:
 
     advanced = geo_billing_via_module(proxy)
     if advanced:
-        log("billing mức 2 (PIN xác thực) %s / %s / %s %s · nguồn %s"
+        log("billing tier 2 (PIN verified) %s / %s / %s %s · source %s"
             % (advanced.get("_ip") or "?", advanced["city"], advanced["state"],
                advanced["postal_code"], advanced.get("_src") or "?"))
         return advanced
@@ -1961,14 +1961,14 @@ def upi_billing_profile(proxy: str = "") -> dict[str, str]:
         try:
             profile = geo_billing_from_proxy(proxy)
         except Exception as exc:  # noqa: BLE001
-            log(f"billing theo IP lỗi: {str(exc)[:100]}", "[WARN] ")
+            log(f"billing by IP failed: {str(exc)[:100]}", "[WARN] ")
             profile = {}
         # KHÔNG log nguồn ở đây nữa: `geo_billing_from_proxy()` đã log rõ từng mức
         # ("mức 2 (PIN xác thực)" / "mức 1 (ipwho+Nominatim)"). Log thêm một dòng
         # chung ở đây từng ghi sai tên mức — kết quả mức 2 nhưng vẫn đề "mức 1".
     if not profile:
         profile = generate_dynamic_in_billing()
-        log("billing dùng list cứng (%s) — cả mức 2 và mức 1 đều không dựng được địa chỉ"
+        log("billing using the hardcoded list (%s) — neither tier 2 nor tier 1 could build an address"
             % profile["city"], "[WARN] ")
     profile.pop("_ip", None)
 

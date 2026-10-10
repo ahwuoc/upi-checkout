@@ -1320,15 +1320,15 @@ def run(mode: str, tokens: list[str], proxy_path: str, workers: int,
 def main() -> int:
     p = argparse.ArgumentParser(description="UPI Checkout Unified CLI")
     p.add_argument("mode", choices=["oaics", "cs", "auto", "scan", "qr", "batch"],
-                   help="Chế độ chạy: oaics / cs / auto / scan / qr / batch")
-    p.add_argument("accounts", nargs="?", help="File chứa 1 JWT/dòng")
-    p.add_argument("--token", help="1 JWT duy nhất (thay cho accounts)")
+                   help="Run mode: oaics / cs / auto / scan / qr / batch")
+    p.add_argument("accounts", nargs="?", help="File with one JWT per line")
+    p.add_argument("--token", help="A single JWT (instead of accounts)")
     p.add_argument("--proxy", default=None,
-                   help="File proxy (mặc định dùng proxy.txt)")
+                   help="Proxy file (defaults to proxy.txt)")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--retries", type=int, default=1,
-                   help="Số lần thử lại mỗi acc khi bị risk decline (1-5). Mỗi lần thử\n"
-                        "dùng device_id + phiên proxy MỚI, chạy tuần tự.")
+                   help="Retries per account on risk decline (1-5). Each retry uses a NEW\n"
+                        "device_id + proxy session, run sequentially.")
     p.add_argument("--promo", default="off")
     p.add_argument("--country", default="IN")
     args = p.parse_args()

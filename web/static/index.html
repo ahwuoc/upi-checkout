@@ -25,7 +25,7 @@
 
       <div class="sidebar-content">
       <div class="sidebar-intro">
-        <span class="section-eyebrow">01 / THIẾT LẬP</span>
+        <span class="section-eyebrow">01 / SETUP</span>
         <h2>New batch</h2>
         <p>Add accounts and set up parallel processing.</p>
       </div>
@@ -89,7 +89,7 @@
         <summary>Advanced settings</summary>
         <div class="advanced-body">
           <div class="field">
-            <label for="country">Quốc gia</label>
+            <label for="country">Country</label>
             <input id="country" type="text" value="IN" maxlength="2" autocapitalize="characters">
           </div>
           <div class="field">
@@ -111,7 +111,7 @@
       <div class="job-pill">
         <label class="job-pill-label" for="job-id-input">Open batch by ID</label>
         <div class="job-pill-line">
-          <input id="job-id-input" class="job-pill-input mono" placeholder="Nhập job ID"
+          <input id="job-id-input" class="job-pill-input mono" placeholder="Enter job ID"
                  maxlength="12" spellcheck="false" autocomplete="off" list="job-id-list">
           <datalist id="job-id-list"></datalist>
           <button type="button" class="btn-mini" id="job-id-load" title="Open this batch history">Open ↗</button>
@@ -134,7 +134,7 @@
       <div class="sidebar-footer">
         <div class="summary-box">
           <div id="summary-tasks">No tokens yet</div>
-          <div class="summary-total" id="summary-total">Tổng: 0 task</div>
+          <div class="summary-total" id="summary-total">Total: 0 tasks</div>
         </div>
         <div class="warning" id="warning" hidden></div>
         <button type="button" class="submit" id="submit" disabled>Run 0 tasks</button>
@@ -236,7 +236,7 @@
           <button type="button" class="tab" data-filter="running" role="tab" aria-selected="false">Running <span class="tab-count" id="c-running">0</span></button>
           <button type="button" class="tab" data-filter="queued" role="tab" aria-selected="false">Queued <span class="tab-count" id="c-queued">0</span></button>
           <button type="button" class="tab" data-filter="success" role="tab" aria-selected="false">Success <span class="tab-count" id="c-success">0</span></button>
-          <button type="button" class="tab" data-filter="fail" role="tab" aria-selected="false">Lỗi <span class="tab-count" id="c-fail">0</span></button>
+          <button type="button" class="tab" data-filter="fail" role="tab" aria-selected="false">Failed <span class="tab-count" id="c-fail">0</span></button>
           <button type="button" class="tab" data-filter="stopped" role="tab" aria-selected="false">Stopped <span class="tab-count" id="c-stopped">0</span></button>
         </div>
         <div class="queue-tools">

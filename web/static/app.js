@@ -36,8 +36,8 @@ const tasks = new Map();
 
 const MODE_HINTS = {
   auto: 'Detects the provider and picks the right flow for each account.',
-  oaics: 'Luồng OAICS: confirmation_tokens → checkout/confirm → intent confirm.',
-  cs: 'Luồng CS: payment_pages + approve (extract_cs).',
+  oaics: 'OAICS flow: confirmation_tokens → checkout/confirm → intent confirm.',
+  cs: 'CS flow: payment_pages + approve (extract_cs).',
 };
 
 // Backend gửi 2 loại status khác nhau:
@@ -317,7 +317,7 @@ function rowStatusText(t) {
       : 'Never ran — job stopped before its turn (token intact)';
   }
   if (t.status === 'success') return 'QR link created';
-  if (t.status === 'fail') return 'Lỗi: ' + failReason(t);
+  if (t.status === 'fail') return 'Failed: ' + failReason(t);
   if (t.status === 'running') return 'Running…';
   // Vị trí trong queue = số thứ tự dòng token, để biết task này là token thứ mấy
   // trong 100 dòng đã dán (trước đây chỉ ghi "Chờ xử lý", không biết đang ở đâu).
@@ -357,7 +357,7 @@ function chipFor(t) {
   if (!p.ok && !st) return ['Awaiting payment', 'chip-amber'];   // chưa dò được -> vẫn coi là chưa xong
   const byProbe = {
     succeeded: ['Customer approved', 'chip-green'],
-    failed: ['Stripe từ chối', 'chip-red'],
+    failed: ['Stripe declined', 'chip-red'],
     canceled: ['Cancelled', 'chip-red'],
     expired: ['Expired', 'chip-amber'],
     waiting: ['Awaiting payment', 'chip-amber'],
@@ -1729,7 +1729,7 @@ function setSubmitState() {
     els.submit.classList.add('danger');
     els.submit.disabled = false;
   } else if (state.running) {
-    els.submit.textContent = 'Dừng job' + jidTag;
+    els.submit.textContent = 'Stop job' + jidTag;
     els.submit.classList.add('danger');
     els.submit.disabled = false;
   } else {
@@ -1908,7 +1908,7 @@ function onProxyQuality(evt) {
   if (b.country) parts.push(b.country);
   if (b.risk != null) parts.push('risk ' + b.risk);
   if (b.user_type) parts.push(b.user_type);
-  if (evt.scanned) parts.push('chấm ' + evt.scanned + ' proxy');
+  if (evt.scanned) parts.push('scored ' + evt.scanned + ' proxies');
   if (g.verified) parts.push('replaced ' + g.verified + ' proxies (' + g.sess_minutes + ' min)');
   else if (evt.excluded) parts.push('excluded ' + evt.excluded);
   if (parts.length) toast('Pool proxy: ' + parts.join(' · '));
@@ -2253,7 +2253,7 @@ async function stopJob() {
       return;
     }
   } catch (e) {
-    toast('Mất kết nối khi gửi lệnh dừng');
+    toast('Connection lost while sending the stop request');
     return;
   }
 
