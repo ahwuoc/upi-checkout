@@ -508,7 +508,11 @@ def get_job_overlay(job_id: str) -> dict | None:
     job = _JOBS.get(job_id)
     if job is None:
         return None
-    payload = link_watch_overlay(job.snapshot())
+    payload = job.snapshot()
+    # Tự chữa lành: link nào của job đang chạy mà chưa có trong sổ thì nạp vào (chỉ ghi khi có
+    # thêm), để vòng dò bắt đầu theo dõi kể cả khi lần verify đầu bị lỗi.
+    backfill_link_watch(payload)
+    payload = link_watch_overlay(payload)
     with _SNAPSHOT_CACHE_LOCK:
         _SNAPSHOT_CACHE[job_id] = (now, payload)
         if len(_SNAPSHOT_CACHE) > 64:
@@ -1905,6 +1909,14 @@ def _verify_link(job: Job, task: Task, result: dict, link: str) -> None:
     """
     if not link or not artifact_probe.is_upi_instructions_url(link):
         return
+    now = int(time.time())
+    # ĐĂNG KÝ VÀO SỔ TRƯỚC KHI DÒ. Nếu chỉ ghi sau khi dò xong thì link có lần dò đầu lỗi
+    # (SSLError/timeout) sẽ KHÔNG BAO GIỜ vào sổ -> monitor không bao giờ thử lại, và chip
+    # đứng ở "Not verified yet" vĩnh viễn (đo thật 22/10, task t4508 job b0089de449d9: proxy
+    # ghim lỗi SSLError, dò bằng 3 proxy khác đều ra `succeeded`).
+    link_watch_upsert(job.job_id, task.task_id, link, _task_proxy(task),
+                      state="", checked_at=now, first_seen=now)
+    _ledger_save()
     probe = artifact_probe.probe(link, proxy=_task_proxy(task))
     result["intent_state"] = probe.get("intent_state")
     result["fam"] = probe.get("fam")
@@ -1913,7 +1925,6 @@ def _verify_link(job: Job, task: Task, result: dict, link: str) -> None:
     # Mốc gốc cho vòng dò nền: link vừa ra đời BÂY GIỜ, và trạng thái vừa đo được
     # là baseline. Nhờ vậy `age` trong log ("khách quét sau Ns") đếm từ lúc tạo link,
     # không phải từ lần dò đầu tiên của monitor (sẽ trễ tới 30s và luôn ra ~0).
-    now = int(time.time())
     task.link_first_seen = now
     task.link_checked_at = now
     task.link_fam = str(probe.get("fam") or "")

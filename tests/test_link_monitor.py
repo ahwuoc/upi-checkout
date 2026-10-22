@@ -181,6 +181,29 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(saved["proxy"], "http://user:pass@good:9090")
         self.assertGreater(saved.get("proxy_ok_at") or 0, 0)
 
+    def test_link_registered_even_when_first_probe_fails(self):
+        """Link phải vào SỔ ngay cả khi lần dò đầu lỗi — nếu không nó bị bỏ đói vĩnh viễn."""
+        emitted: list[dict] = []
+        job = SimpleNamespace(job_id=JOB, _lock=threading.RLock(), tasks={})
+        task = SimpleNamespace(task_id="t1", link_state="", link_fam="", link_zero=False,
+                               link_note="", link_checked_at=0, link_first_seen=0,
+                               error="", raw_status="PASS", proxy="http://user:pass@px:8080",
+                               egress=None, plus_state="", plus_note="", plus_checked_at=0,
+                               token="tok", index=0)
+        job.tasks["t1"] = task
+        job.emit = emitted.append
+        job.log_line = lambda *_a, **_k: None
+        engine._JOBS[JOB] = job
+        with patch.object(engine.artifact_probe, "probe",
+                          return_value={"ok": False, "error": "SSLError"}):
+            engine._verify_link(job, task, {}, LINK)
+        saved = engine.link_watch_get(JOB, "t1")
+        self.assertTrue(saved)
+        self.assertEqual(saved["proxy"], "http://user:pass@px:8080")
+        self.assertEqual(saved["link"], LINK)
+        self.assertEqual(task.link_state, "")          # chưa kết luận, nhưng ĐÃ được theo dõi
+        self.assertIn("unverified", task.error)
+
     # --- UI đọc trạng thái từ sổ -----------------------------------------
     def test_snapshot_overlay_shows_the_new_link_state(self):
         self.upsert(state="succeeded")
