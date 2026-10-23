@@ -156,7 +156,9 @@ async function openJob(jobId?: string): Promise<void> {
   error.value = ''
   try {
     // Job có thể không nằm trong 20 job mới nhất (deep link `?job=` tới job cũ) — vẫn mở được.
-    const target = jobId || jobs.value[0]?.job_id
+    // Mặc định chọn job MỚI NHẤT còn task (job đã bị Clear hết thì bỏ qua, đừng mở job rỗng).
+    const firstWithTasks = jobs.value.find((j) => Number(j.total || 0) > 0)
+    const target = jobId || firstWithTasks?.job_id || jobs.value[0]?.job_id
     if (!target) {
       job.value = null
       tasks.clear()

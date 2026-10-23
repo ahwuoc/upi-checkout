@@ -359,6 +359,15 @@ Nay:
 `/next` chỉ còn redirect 308 về `/` cho bookmark cũ. Muốn xem lại bản cũ thì lấy từ git history
 (commit trước `4bd621d`).
 
+**Chọn batch (`JobPicker.vue`)** — thay `<select>` trần: mỗi dòng hiện `#id · trạng thái ·
+✓success / total · ✗fail · HH:MM DD/MM`, màu `chart-2`/`destructive`; nút mở cũng hiện ngay số
+success của batch đang xem. Danh sách 20 batch gần nhất, có scroll.
+
+**Biểu đồ ngày (`DailyChart.vue`)** — panel "₹0.00 codes extracted per day" (bản vanilla cũ):
+21 ngày gần nhất từ `GET /api/stats/global` (`days[]`), cột = số code ₹0.00/ngày, ngày cao nhất
+tô `--chart-1`, các ngày khác `--chart-2`, hover ra tooltip (ngày / code / paid / unknown / jobs).
+Màu **lấy nguyên token shadcn**, không pha opacity.
+
 **Sidebar điều khiển job đã có ở `/`** (`web/fe/src/components/ControlPanel.vue`): dán access
 token (đếm token ngay), Flow (CS/OAICS/Auto), Country, Workers (1–300), Runs/account (1–5),
 Advanced settings (Promotion, proxy riêng, Mix pool order, Proxy quality filter, Stripe session,

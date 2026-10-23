@@ -95,8 +95,7 @@ async def run(url: str, n_tokens: int, shot: str | None) -> int:
         await page.get_by_role("button", name="6", exact=True).click()
         await page.wait_for_timeout(600)
         cols = await page.evaluate(
-            """() => { const g=[...document.querySelectorAll('div')]
-                 .find(d=>d.className.includes('grid')&&d.querySelector('[data-slot=card]'));
+            """() => { const g = document.querySelector('[data-testid="task-grid"]');
                  return g ? getComputedStyle(g).gridTemplateColumns.split(' ').length : 0 }""")
         check("chọn 6 cột có hiệu lực", cols == 6, str(cols))
         await page.locator("header button").first.click()

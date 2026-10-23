@@ -123,6 +123,7 @@ const tabs = computed<Array<{ key: TabKey; label: string; count: number }>>(() =
 
     <div
       v-if="desk.visibleTasks.value.length"
+      data-testid="task-grid"
       :class="
         desk.view.value === 'grid'
           ? 'grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5'

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue' 
 import ControlPanel from '@/components/ControlPanel.vue'
+import DailyChart from '@/components/DailyChart.vue'
+import JobPicker from '@/components/JobPicker.vue'
 import StatsBar from '@/components/StatsBar.vue'
 import TasksPanel from '@/components/TasksPanel.vue'
 import { Moon, Sun } from '@lucide/vue'
@@ -57,15 +59,7 @@ onMounted(() => {
           </Tooltip>
         </TooltipProvider>
       </div>
-      <select
-        class="h-9 max-w-72 rounded-md border border-input bg-transparent px-2 text-sm"
-        :value="desk.job.value?.job_id || ''"
-        @change="desk.openJob(($event.target as HTMLSelectElement).value)"
-      >
-        <option v-for="j in desk.jobs.value" :key="j.job_id" :value="j.job_id">
-          {{ j.job_id }} · {{ j.status }} · {{ j.done }}/{{ j.total }}
-        </option>
-      </select>
+      <JobPicker />
     </header>
 
     <main class="mx-auto grid max-w-[1900px] gap-4 px-5 pb-10 lg:grid-cols-[340px_minmax(0,1fr)]">
@@ -73,7 +67,10 @@ onMounted(() => {
         <ControlPanel />
       </div>
       <div class="min-w-0 space-y-4">
-        <StatsBar />
+        <div class="grid gap-4">
+          <StatsBar />
+          <DailyChart />
+        </div>
         <TasksPanel />
       </div>
     </main>
