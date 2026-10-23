@@ -352,6 +352,17 @@ Nay:
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
+## Phân tích lịch sử: `analyze_history.py`
+
+```bash
+python3 analyze_history.py --days 7          # tỉ lệ theo ngày, phân bố lỗi, so trước/sau mốc sửa
+python3 analyze_history.py --errors          # kèm top câu lỗi thô
+```
+
+Đọc `logs/web_<job>_results.json` (cùng nguồn desk dùng cho lịch sử) + `cs_state/link_watch.json`;
+chỉ đọc, không sửa. Nhóm lỗi khớp `web/fe/src/lib/taskView.ts` để số liệu khớp giao diện. Dùng để
+trả lời "lần sửa vừa rồi có cải thiện thật không?" thay vì đoán.
+
 ## Giao diện: Vite + Vue 3 + TS + shadcn-vue (chỉ còn một bản, ở `/`)
 
 `/` phục vụ bản Vue (`web/fe` → `web/static/dist`), asset ở `/assets/*`. Giao diện vanilla cũ
