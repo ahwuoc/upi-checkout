@@ -48,12 +48,14 @@ VERDICT_LABELS = {
     "active_sub": "Có gói đang hoạt động (bỏ qua)",
     "banned": "Bị khoá / deactivated",
     "token_invalid": "Token chết (401)",
+    "token_expired": "Token hết hạn/thu hồi — cần refresh AT",
     "rate_limited": "Bị giới hạn (429)",
     "network_error": "Lỗi mạng/proxy (thử lại)",
     "bad_token": "Token không hợp lệ (sai định dạng)",
     "expired": "Token hết hạn (exp)",
 }
-DROP_VERDICTS = {"plus_active", "active_sub", "banned", "token_invalid", "bad_token", "expired"}
+DROP_VERDICTS = {"plus_active", "active_sub", "banned", "token_invalid", "token_expired",
+                 "bad_token", "expired"}
 
 
 # --------------------------------------------------------------------- token
@@ -190,9 +192,14 @@ class ProbeResult:
         }
 
 
-def probe_token(token: str, proxy: str = "", promo_id: str = "plus-1-month-free",
-                timeout: int = 20) -> ProbeResult:
-    """1 token -> 1 GET. Không tạo checkout, không ghi gì ra đĩa."""
+def probe_token(token: str, proxy: str | list[str] = "", promo_id: str = "plus-1-month-free",
+                timeout: int = 20, retries: int = 3) -> ProbeResult:
+    """1 token -> 1 GET. Không tạo checkout, không ghi gì ra đĩa.
+
+    `proxy` nhận 1 proxy hoặc cả pool: lỗi TLS/connection (proxy chết) thì đổi proxy khác và
+    thử lại, tối đa `retries` lần — đo thật: lần chạy đầu với 1 proxy bị SSLError, đổi proxy
+    là 200 ngay. Chỉ trả `network_error` khi ĐÃ thử hết.
+    """
     token = token.strip()
     mark = fingerprint(token)
     email = token_email(token)
@@ -200,23 +207,50 @@ def probe_token(token: str, proxy: str = "", promo_id: str = "plus-1-month-free"
     if reason:
         return ProbeResult(mark, email, reason, VERDICT_LABELS.get(reason, reason))
 
+    candidates = ([proxy] if isinstance(proxy, str) else list(proxy)) or [""]
+    candidates = [c for c in candidates if c is not None]
     started = time.time()
-    try:
-        import requests  # noqa: PLC0415 — chỉ cần khi thật sự gọi mạng
-        proxies = {"http": proxy, "https": proxy} if proxy else None
-        resp = requests.get(
-            f"{CHECK_URL}?timezone_offset_min=-480",
-            headers=_headers(token),
-            proxies=proxies,
-            timeout=timeout,
-        )
-    except Exception as exc:  # noqa: BLE001 — mạng là ngoại lệ bình thường ở đây
-        return ProbeResult(mark, email, "network_error", f"{type(exc).__name__}: {exc}"[:120],
-                           int((time.time() - started) * 1000))
+    last_error = ""
+    for attempt in range(max(1, min(retries, len(candidates)))):
+        candidate = candidates[attempt]
+        try:
+            import requests  # noqa: PLC0415 — chỉ cần khi thật sự gọi mạng
+            proxies = {"http": candidate, "https": candidate} if candidate else None
+            resp = requests.get(
+                f"{CHECK_URL}?timezone_offset_min=-480",
+                headers=_headers(token),
+                proxies=proxies,
+                timeout=timeout,
+            )
+        except Exception as exc:  # noqa: BLE001 — mạng là ngoại lệ bình thường ở đây
+            last_error = f"{type(exc).__name__}: {exc}"[:120]
+            continue
+        return _result_from_response(resp, mark, email, promo_id, started)
+    return ProbeResult(mark, email, "network_error", last_error or "network error",
+                       int((time.time() - started) * 1000))
+
+
+def _result_from_response(resp: Any, mark: str, email: str, promo_id: str,
+                          started: float) -> ProbeResult:
 
     ms = int((time.time() - started) * 1000)
     if resp.status_code == 401:
-        return ProbeResult(mark, email, "token_invalid", "HTTP 401", ms)
+        # Body của OpenAI rất cụ thể: {"error":{"code":"token_expired",
+        # "message":"Your authentication token has expired. Please try refreshing it."}}
+        # AT có thể còn hạn theo `exp` trong JWT mà vẫn bị 401 (session bị thu hồi) — nên
+        # phải đọc code chứ đừng đoán.
+        code, message = "", ""
+        try:
+            body = resp.json()
+            err = body.get("error") if isinstance(body, dict) else None
+            if isinstance(err, dict):
+                code = str(err.get("code") or "")
+                message = str(err.get("message") or "")
+        except ValueError:
+            message = (resp.text or "")[:120]
+        verdict = "token_expired" if "expire" in code.lower() else "token_invalid"
+        detail = f"{code}: {message}" if code else (message or "HTTP 401")
+        return ProbeResult(mark, email, verdict, detail[:160], ms)
     if resp.status_code == 429:
         return ProbeResult(mark, email, "rate_limited", "HTTP 429", ms)
     if resp.status_code != 200:
@@ -292,7 +326,10 @@ def start(tokens: Iterable[str], proxy_pool: list[str] | None = None, workers: i
             index, token = index_token
             if run.stop.is_set():
                 return
-            outcome = probe_token(token, pick_proxy(proxy_pool, index), promo_id)
+            # Xoay vòng điểm bắt đầu trong pool, và cho probe tự đổi proxy khi TLS lỗi.
+            rotated = [pick_proxy(proxy_pool, index + step)
+                       for step in range(min(3, max(1, len(proxy_pool))))]
+            outcome = probe_token(token, rotated, promo_id)
             if run.stop.is_set():
                 return
             row = outcome.as_dict()

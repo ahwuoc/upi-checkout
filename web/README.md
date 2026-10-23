@@ -374,6 +374,13 @@ Kết luận (`verdict`): `eligible` (giữ) · `not_eligible` (giữ, để pip
 proxy) · `plus_active`/`active_sub`/`banned`/`token_invalid`/`bad_token`/`expired` (loại, không
 tốn proxy) · `network_error`/`rate_limited` (giữ).
 
+Gặp thật (23/10): một AT còn hạn trên JWT (`exp` +6 ngày) vẫn bị 401
+`{"code":"token_expired","message":"Your authentication token has expired. Please try refreshing
+it."}` trên cả `/backend-api/me`, `/accounts/check`, `/subscriptions` — tức session đã bị thu hồi
+chứ không phải hết hạn theo đồng hồ. Vì vậy probe đọc `error.code` để tách `token_expired`
+(“hết hạn/thu hồi — cần refresh AT”) khỏi `token_invalid` (401 không rõ lý do), và **retry đổi
+proxy** khi TLS lỗi (proxy đầu SSLError là chuyện thường gặp với pool 500).
+
 Dùng:
 
 * Sidebar → công tắc **“Lọc token trước khi chạy”** (mặc định bật) + nút **Check tokens**;

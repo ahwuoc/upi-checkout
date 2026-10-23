@@ -99,6 +99,32 @@ class TokenParsingTests(unittest.TestCase):
     def test_malformed_token_flagged_without_network(self):
         self.assertEqual(prefilter.probe_token("abc.def").verdict, "bad_token")
 
+    def test_401_body_token_expired_maps_to_token_expired(self):
+        class FakeResp:
+            status_code = 401
+
+            @staticmethod
+            def json():
+                return {"error": {"code": "token_expired",
+                                  "message": "Your authentication token has expired."}}
+
+        result = prefilter._result_from_response(FakeResp(), "fp", "a@b.c", "plus-1-month-free", 0.0)
+        self.assertEqual(result.verdict, "token_expired")
+        self.assertIn("token_expired", result.detail)
+        self.assertIn("token_expired", prefilter.DROP_VERDICTS)
+
+    def test_401_without_code_stays_token_invalid(self):
+        class FakeResp:
+            status_code = 401
+            text = "unauthorized"
+
+            @staticmethod
+            def json():
+                raise ValueError("not json")
+
+        result = prefilter._result_from_response(FakeResp(), "fp", "", "x", 0.0)
+        self.assertEqual(result.verdict, "token_invalid")
+
     def test_fingerprint_is_stable_and_short(self):
         token = make_token()
         self.assertEqual(prefilter.fingerprint(token), prefilter.fingerprint(token))
@@ -114,7 +140,8 @@ class VerdictBookkeepingTests(unittest.TestCase):
     def test_drop_verdicts_are_exactly_the_dead_ones(self):
         self.assertEqual(
             prefilter.DROP_VERDICTS,
-            {"plus_active", "active_sub", "banned", "token_invalid", "bad_token", "expired"},
+            {"plus_active", "active_sub", "banned", "token_invalid", "token_expired",
+             "bad_token", "expired"},
         )
 
     def test_not_eligible_is_kept(self):

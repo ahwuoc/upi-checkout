@@ -73,6 +73,7 @@ const VERDICT_LABELS: Record<string, string> = {
   active_sub: 'Có gói',
   banned: 'Bị khoá',
   token_invalid: 'Token chết',
+  token_expired: 'Hết hạn/thu hồi',
   rate_limited: 'Bị 429',
   network_error: 'Lỗi mạng',
   bad_token: 'Sai định dạng',
