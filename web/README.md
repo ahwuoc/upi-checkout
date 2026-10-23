@@ -352,6 +352,45 @@ Nay:
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
+## Bản frontend mới: Vite + Vue 3 + TS + shadcn-vue (chạy song song ở `/next`)
+
+Bản giao diện vanilla (`web/static/{index.html,app.js,style.css}`) vẫn ở `/` và **không bị thay
+đổi**. Bản dựng bằng framework nằm ở `/next` để so sánh trước khi đổi hẳn.
+
+```
+web/fe/                 # mã nguồn: Vite 8 + Vue 3.5 + TS + Tailwind 4 + shadcn-vue (reka-ui)
+web/fe/src/lib/api.ts       # kiểu dữ liệu + fetch /api/*, EventSource /api/stream
+web/fe/src/composables/useDesk.ts  # store: job, Map task theo task_id, patch từ SSE
+web/fe/src/lib/taskView.ts  # nhãn/màu chip trạng thái, lý do fail (giữ đúng ngữ nghĩa bản cũ)
+web/fe/src/components/*     # StatsBar, TasksPanel, TaskCard, StatusChip
+web/static/dist/        # KẾT QUẢ BUILD — commit để server chạy không cần Node
+```
+
+Lệnh:
+
+```bash
+pnpm -C web/fe install          # lần đầu
+pnpm -C web/fe dev              # dev server :5174, proxy /api -> :8099 (HMR)
+pnpm -C web/fe build            # build ra web/static/dist (base '/next/')
+```
+
+FastAPI mount sẵn: `/next` (và `/next/`) phục vụ `static/dist`, asset trỏ `/next/assets/…`; nếu
+chưa build thì trả 404 kèm hướng dẫn. `app.py` chỉ thêm 2 dòng mount + 1 route, không đổi API.
+
+Khác biệt có chủ đích so với bản vanilla:
+
+* **Render giới hạn 120 card/lần + nút “Load more”** — job thật 6.000 task, vẽ hết DOM sẽ treo.
+* **Ảnh QR lấy trực tiếp `artifact.qr_png`** (không qua `/api/artifact` — endpoint đó trả JSON
+  trạng thái), và **ẩn QR khi link ở trạng thái cuối** hoặc khi Stripe đã xoá ảnh (HTTP 410),
+  thay vì để khung ảnh vỡ.
+* **Giữ job đang xem trên URL** (`/next?job=<id>`), mở được cả job cũ không nằm trong 20 job mới
+  nhất; SSE `job_done` không làm mất lựa chọn.
+* Chip trạng thái tách 3 mức như bản vanilla: `Payment successful` / `Awaiting payment` /
+  `Not verified yet` (kèm tuổi lần dò), và `Plus Success` chỉ hiện khi thật sự lên Plus.
+
+Đã kiểm bằng Chromium (Playwright): trang render, SSE `Live (SSE)`/`Finished` đúng, 8/8 card
+Success có QR decode được (với link còn hạn), không lỗi console; deep link `?job=` hoạt động.
+
 ## Vòng dò link: "Awaiting payment" không được đứng im
 
 Chip "Awaiting payment" = trang instructions trả `intent_state=requires_action`, tức uỷ nhiệm

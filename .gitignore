@@ -17,6 +17,13 @@ cs_state/
 dumps/
 .cache/
 
+# ---- Frontend (web/fe) ----
+web/fe/node_modules/
+web/fe/dist/
+web/fe/.vite/
+# Bản build được COMMIT (web/static/dist) để server chạy không cần Node.
+*.tsbuildinfo
+
 # ---- Python ----
 __pycache__/
 *.py[cod]

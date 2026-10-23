@@ -127,6 +127,21 @@ def index() -> FileResponse:
 
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
+# Bản Vue 3 + shadcn-vue (web/fe -> build ra static/dist, base '/next/').
+# Chạy SONG SONG với bản vanilla ở '/' để so sánh trước khi thay hẳn.
+FE_DIST = STATIC / "dist"
+if FE_DIST.is_dir():
+    app.mount("/next", StaticFiles(directory=str(FE_DIST), html=True), name="next")
+
+
+@app.get("/next")
+def next_index() -> FileResponse:
+    """`/next` (không có dấu /) -> index của bản Vue (asset đã trỏ '/next/...')."""
+    f = FE_DIST / "index.html"
+    if not f.is_file():
+        raise HTTPException(404, "bản Vue chưa build: pnpm -C web/fe build")
+    return FileResponse(f)
+
 
 # ---------------------------------------------------------------------- api
 @app.post("/api/run")
