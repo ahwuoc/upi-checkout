@@ -6,7 +6,8 @@
  * các cờ thử nghiệm, nút Run/Stop. Toàn bộ giá trị lưu vào localStorage để mở lại không mất.
  */
 import { computed, onMounted, reactive, ref } from 'vue'
-import { Check, Copy, KeyRound, Loader2, Play, Square } from '@lucide/vue'
+import { Check, Copy, Filter, KeyRound, Loader2, Play, Square } from '@lucide/vue'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -25,7 +26,7 @@ import {
 } from '@/components/ui/collapsible'
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { api, ApiError, type RunPayload } from '@/lib/api'
+import { api, ApiError, type PrefilterStatus, type RunPayload } from '@/lib/api'
 import { useDesk } from '@/composables/useDesk'
 
 const desk = useDesk()
@@ -46,9 +47,15 @@ const form = reactive({
   filterProxies: true,
   stripeTelemetry: false,
   dumpTraffic: false,
+  prefilter: true,
 })
 
 const starting = ref(false)
+const checking = ref(false)
+const prefilter = ref<PrefilterStatus | null>(null)
+const prefilterId = ref('')
+const prefilterError = ref('')
+let pollTimer: ReturnType<typeof setInterval> | null = null
 const copied = ref(false)
 let copyTimer: ReturnType<typeof setTimeout> | null = null
 const stopping = ref(false)
@@ -59,6 +66,30 @@ const tokenCount = computed(
   () => form.tokens.split('\n').map((t) => t.trim()).filter(Boolean).length,
 )
 const jobRunning = computed(() => desk.job.value?.status === 'running')
+
+const VERDICT_LABELS: Record<string, string> = {
+  eligible: 'Đủ điều kiện',
+  plus_active: 'Đã Plus',
+  active_sub: 'Có gói',
+  banned: 'Bị khoá',
+  token_invalid: 'Token chết',
+  rate_limited: 'Bị 429',
+  network_error: 'Lỗi mạng',
+  bad_token: 'Sai định dạng',
+  expired: 'Hết hạn',
+  not_eligible: 'Không đủ promo',
+}
+function verdictLabel(verdict: string): string {
+  return VERDICT_LABELS[verdict] || verdict
+}
+
+/** Thay ô token bằng đúng những acc vừa được giữ lại. */
+function applyKept(): void {
+  const keep = new Set((prefilter.value?.results || []).filter((r) => !r.dropped).map((r) => r.index))
+  const tokens = form.tokens.split('\n').map((line) => line.trim()).filter(Boolean)
+  form.tokens = tokens.filter((_, index) => keep.has(index)).join('\n')
+  saveForm()
+}
 
 onMounted(() => {
   try {
@@ -105,6 +136,47 @@ function saveForm(): void {
   }
 }
 
+/** Gọi prefilter và poll tới khi xong. Trả về danh sách token ĐỦ điều kiện. */
+async function runPrefilter(tokens: string): Promise<string[]> {
+  prefilterError.value = ''
+  checking.value = true
+  prefilter.value = null
+  try {
+    const started = await api.prefilter({
+      tokens,
+      workers: Math.max(2, Math.min(16, Number(form.workers) || 8)),
+      proxies: form.useProxy ? form.proxies || null : null,
+    })
+    prefilterId.value = started.id
+    for (;;) {
+      const snap = await api.prefilterStatus(started.id)
+      prefilter.value = snap
+      if (snap.state !== 'running') break
+      await new Promise((resolve) => setTimeout(resolve, 700))
+    }
+    const keep = new Set(
+      (prefilter.value?.results || []).filter((r) => !r.dropped).map((r) => r.index),
+    )
+    return tokens
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((_, index) => keep.has(index))
+  } catch (exc) {
+    prefilterError.value = exc instanceof ApiError ? exc.message : String(exc)
+    return tokens
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+  } finally {
+    checking.value = false
+    if (pollTimer) {
+      clearInterval(pollTimer)
+      pollTimer = null
+    }
+  }
+}
+
 async function startJob(): Promise<void> {
   error.value = ''
   if (!tokenCount.value) {
@@ -113,8 +185,17 @@ async function startJob(): Promise<void> {
   }
   starting.value = true
   try {
+    let tokens = form.tokens
+    if (form.prefilter) {
+      const kept = await runPrefilter(tokens)
+      if (!kept.length) {
+        error.value = `Bộ lọc loại hết ${tokenCount.value} token — không còn acc nào đủ điều kiện để chạy.`
+        return
+      }
+      tokens = kept.join('\n')
+    }
     const payload: RunPayload = {
-      tokens: form.tokens,
+      tokens,
       mode: form.mode,
       country: form.country.toUpperCase() || 'IN',
       promo: form.promo,
@@ -288,6 +369,69 @@ async function stopJob(): Promise<void> {
         </div>
       </CollapsibleContent>
     </Collapsible>
+
+    <div class="space-y-2 rounded-lg border p-3">
+      <div class="flex items-center justify-between gap-2">
+        <div>
+          <Label for="prefilter" class="flex items-center gap-1.5">
+            <Filter class="size-3.5 text-muted-foreground" />
+            Lọc token trước khi chạy
+          </Label>
+          <p class="text-[11px] text-muted-foreground">
+            1 GET/token — loại acc đã Plus, bị khoá, token chết, không đủ điều kiện promo
+          </p>
+        </div>
+        <Switch id="prefilter" v-model="form.prefilter" @update:model-value="saveForm" />
+      </div>
+
+      <div class="flex items-center gap-2">
+        <Button
+          id="check-tokens"
+          variant="secondary"
+          size="sm"
+          class="flex-1"
+          :disabled="checking || !tokenCount"
+          @click="runPrefilter(form.tokens)"
+        >
+          <Loader2 v-if="checking" class="animate-spin" />
+          <Filter v-else />
+          {{ checking ? 'Đang kiểm…' : 'Check tokens' }}
+        </Button>
+        <Button
+          v-if="prefilter && prefilter.dropped > 0"
+          size="sm"
+          variant="outline"
+          @click="applyKept"
+        >
+          Dùng {{ prefilter.kept }}
+        </Button>
+      </div>
+
+      <div v-if="prefilter" class="space-y-1">
+        <div class="flex items-center justify-between text-[11px] text-muted-foreground">
+          <span>{{ prefilter.checked }}/{{ prefilter.total }} · giữ {{ prefilter.kept }}</span>
+          <span v-if="prefilter.dropped" class="text-destructive">loại {{ prefilter.dropped }}</span>
+        </div>
+        <div class="h-1.5 overflow-hidden rounded-full bg-muted">
+          <div
+            class="h-full bg-chart-2 transition-[width]"
+            :style="{ width: `${prefilter.total ? (prefilter.checked / prefilter.total) * 100 : 0}%` }"
+          />
+        </div>
+        <div class="flex flex-wrap gap-1">
+          <Badge
+            v-for="(count, verdict) in prefilter.counts"
+            :key="verdict"
+            variant="outline"
+            class="text-[10px]"
+          >
+            {{ verdictLabel(String(verdict)) }}: {{ count }}
+          </Badge>
+        </div>
+      </div>
+
+      <p v-if="prefilterError" class="text-[11px] text-destructive">{{ prefilterError }}</p>
+    </div>
 
     <p v-if="error" class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
       {{ error }}

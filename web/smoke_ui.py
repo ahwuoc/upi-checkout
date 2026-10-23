@@ -65,10 +65,22 @@ async def run(url: str, n_tokens: int, shot: str | None) -> int:
         check("CSS đã áp", bg not in ("rgba(0, 0, 0, 0)", "transparent"), bg)
         check("sidebar có ô token", await page.locator("#tokens").count() == 1)
         check("nút Run tồn tại", await page.locator("#submit").count() == 1)
+        check("có công tắc lọc token", await page.locator("#prefilter").count() == 1)
+        check("có nút Check tokens", await page.locator("#check-tokens").count() == 1)
 
-        print("2. Chạy job bằng token giả + proxy chết")
+        print("2. Bộ lọc token (prefilter)")
         await page.fill("#tokens", "\n".join(fake_jwt(f"smoke{i}@example.com")
                                              for i in range(n_tokens)))
+        await page.click("#check-tokens")
+        await page.wait_for_timeout(4000)
+        aside = await page.locator("aside").inner_text()
+        check("bộ lọc chạy và báo kết quả", "giữ" in aside and "loại" in aside, aside[:120])
+
+        print("3. Chạy job bằng token giả + proxy chết")
+        # Token giả bị bộ lọc loại hết -> tắt bộ lọc để test phần chạy job.
+        if await page.locator("#prefilter").is_checked():
+            await page.click("#prefilter")
+        await page.wait_for_timeout(300)
         await page.get_by_role("button", name="Advanced settings").click()
         await page.wait_for_timeout(400)
         if not await page.locator("#use-proxy").is_checked():
@@ -79,7 +91,7 @@ async def run(url: str, n_tokens: int, shot: str | None) -> int:
         await page.wait_for_timeout(6000)
         check("không pageerror sau khi Run", not errors, "; ".join(errors)[:200])
 
-        print("3. Task card render")
+        print("4. Task card render")
         cards = await page.locator('[data-slot="card"]').count()
         check("có task card", cards >= n_tokens, f"{cards} card")
         chips = await page.locator("aside ~ * span, main span").count()
@@ -87,7 +99,7 @@ async def run(url: str, n_tokens: int, shot: str | None) -> int:
         stats = await page.get_by_text("RUNTIME OVERVIEW").count()
         check("khối Runtime overview hiện", stats == 1)
 
-        print("4. Lọc tab + số cột + theme")
+        print("5. Lọc tab + số cột + theme")
         await page.get_by_role("tab", name="Failed").click()
         await page.wait_for_timeout(800)
         failed_cards = await page.locator('[data-slot="card"]').count()
@@ -107,7 +119,7 @@ async def run(url: str, n_tokens: int, shot: str | None) -> int:
             await page.screenshot(path=shot)
             print(f"  ảnh: {shot}")
 
-        print("5. Dọn job test")
+        print("6. Dọn job test")
         job_id = await page.evaluate(
             """() => new URL(window.location.href).searchParams.get('job') || ''"""
         )

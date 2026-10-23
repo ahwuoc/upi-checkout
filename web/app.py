@@ -27,6 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import engine
+import prefilter
 import artifact_probe
 import global_stats
 
@@ -80,6 +81,14 @@ class RunRequest(BaseModel):
     filter_proxies: bool = Field(default=True, description="probe + drop dead/wrong-country proxies")
     stripe_telemetry: bool = Field(default=False, description="register the Stripe session at m.stripe.com")
     dump_traffic: bool = Field(default=False, description="save every API call (headers + body) as HAR entries under dumps/")
+
+
+class PrefilterRequest(BaseModel):
+    """Kiểm tra token trước khi chạy (GET accounts/check, không tạo checkout)."""
+    tokens: str = Field(default="", description="one access token per line")
+    workers: int = Field(default=8, ge=1, le=32)
+    proxies: str | None = Field(default=None, description="proxy list; trống = proxy.txt")
+    promo: str = "plus-1-month-free"
 
 
 class AppendRequest(BaseModel):
@@ -246,6 +255,41 @@ def api_append(job_id: str, req: AppendRequest) -> dict:
     if not result.get("ok"):
         raise HTTPException(400, result.get("error") or "append failed")
     return result
+
+
+@app.post("/api/prefilter")
+def api_prefilter(req: PrefilterRequest) -> dict:
+    """Chạy bộ lọc token nền; trả id để client poll `/api/prefilter/{id}`.
+
+    1 request GET mỗi token (`accounts/check`), KHÔNG tạo checkout — nên kiểm 200 acc
+    nhanh hơn nhiều so với để pipeline tự phát hiện (mỗi acc ineligible tốn ~5 request).
+    """
+    tokens = [t.strip() for t in req.tokens.splitlines() if t.strip()]
+    if not tokens:
+        raise HTTPException(400, "No access tokens provided.")
+    proxies = req.proxies if (req.proxies and req.proxies.strip()) else None
+    try:
+        pool = engine.parse_proxy_lines(proxies) if proxies else engine.cli.load_proxies(
+            engine.DEFAULT_PROXY_FILE)
+    except Exception:  # noqa: BLE001 — thiếu proxy.txt vẫn cho kiểm tra (đi trực tiếp)
+        pool = []
+    run_id = prefilter.start(tokens, [p for p in pool if p], req.workers, req.promo)
+    return {"id": run_id, "total": len(tokens), "proxies": len([p for p in pool if p])}
+
+
+@app.get("/api/prefilter/{run_id}")
+def api_prefilter_status(run_id: str) -> dict:
+    snap = prefilter.status(run_id)
+    if snap is None:
+        raise HTTPException(404, "prefilter run does not exist")
+    return snap
+
+
+@app.post("/api/prefilter/{run_id}/stop")
+def api_prefilter_stop(run_id: str) -> dict:
+    if not prefilter.stop(run_id):
+        raise HTTPException(400, "run is not active")
+    return {"stopped": True}
 
 
 @app.post("/api/stop/{job_id}")

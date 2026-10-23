@@ -352,6 +352,41 @@ Nay:
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
+## Bộ lọc token trước khi chạy (`web/prefilter.py`)
+
+**Endpoint dùng để check promo (lấy từ repo tham khảo `gpt-auto-register-main`, hàm `check_plus`)**:
+
+```
+GET https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27?timezone_offset_min=-480
+Authorization: Bearer <AT> · ChatGPT-Account-ID: <account_id từ JWT>
+```
+
+Đọc `accounts.<id>`: `account.is_deactivated` (bị khoá), `account.plan_type` /
+`entitlement.has_active_subscription` (đã Plus), **`eligible_promo_campaigns`** (có
+`plus-1-month-free` hay không). **1 request/token, không tạo checkout, không chạm Stripe.**
+
+Vì sao KHÔNG "tạo checkout thử để xem promo": đo trên 4 job thật (2.549–6.015 task/ job) —
+acc *ineligible* tốn ~5 request & ~35 s (create_checkout + stripe_init) mới biết; acc *đã Plus*
+tốn ~10 request. Nếu prefilter cũng tạo checkout thì mỗi acc **đủ điều kiện** bị tạo checkout 2
+lần (probe + chạy thật) → tăng bề mặt risk. Dùng GET ở trên thì rẻ hơn và không thêm checkout.
+
+Kết luận (`verdict`): `eligible` (giữ) · `not_eligible` (giữ, để pipeline tự quyết — có thể do
+proxy) · `plus_active`/`active_sub`/`banned`/`token_invalid`/`bad_token`/`expired` (loại, không
+tốn proxy) · `network_error`/`rate_limited` (giữ).
+
+Dùng:
+
+* Sidebar → công tắc **“Lọc token trước khi chạy”** (mặc định bật) + nút **Check tokens**;
+  kết quả hiện `giữ N / loại M` + badge theo lý do, nút **Dùng N** thay ô token bằng acc đủ điều
+  kiện. Bật công tắc thì bấm **Run** sẽ lọc trước rồi mới chạy; lọc hết sạch thì báo lỗi và
+  **không tạo job**.
+* API: `POST /api/prefilter {tokens, workers, proxies}` → `{id}`; poll `GET /api/prefilter/{id}`
+  (`checked/kept/dropped/counts/results[]` có `index` để map lại token); `POST /api/prefilter/{id}/stop`.
+* CLI: `python3 web/prefilter.py --tokens-file tokens.txt --workers 8 [--proxy-file proxy.txt]`.
+
+Test: `tests/test_prefilter.py` (19 case, không cần mạng) — classify payload, JWT email/hạn/
+account_id, round-robin proxy, map fingerprint → token.
+
 ## Phân tích lịch sử: `analyze_history.py`
 
 ```bash

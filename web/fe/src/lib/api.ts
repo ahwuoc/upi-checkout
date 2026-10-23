@@ -163,12 +163,39 @@ export const api = {
     getJson<unknown>(`/api/retry/${jobId}/${taskId}`),
   stats: () => getJson<Record<string, unknown>>('/api/stats/global'),
   run: (payload: RunPayload) => postJson<RunResult>('/api/run', payload),
+  prefilter: (body: { tokens: string; workers: number; proxies?: string | null }) =>
+    postJson<{ id: string; total: number; proxies: number }>('/api/prefilter', body),
+  prefilterStatus: (id: string) => getJson<PrefilterStatus>(`/api/prefilter/${id}`),
+  prefilterStop: (id: string) => postJson<unknown>(`/api/prefilter/${id}/stop`, {}),
   stop: (jobId: string) => postJson<unknown>(`/api/stop/${jobId}`, {}),
 }
 
 /** Ảnh QR / artifact đi qua server để không lộ URL Stripe ra ngoài + có cache. */
 export function artifactUrl(url: string): string {
   return `/api/artifact?url=${encodeURIComponent(url)}`
+}
+
+export interface PrefilterRow {
+  index: number
+  fingerprint: string
+  email: string
+  verdict: string
+  label: string
+  detail: string
+  ms: number
+  dropped: boolean
+}
+
+export interface PrefilterStatus {
+  id: string
+  state: 'running' | 'done' | 'stopped'
+  total: number
+  checked: number
+  kept: number
+  dropped: number
+  counts: Record<string, number>
+  elapsed_ms: number
+  results: PrefilterRow[]
 }
 
 export interface StreamHandle {
