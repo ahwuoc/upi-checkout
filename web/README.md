@@ -358,6 +358,14 @@ Từ 23/10, `/` phục vụ **bản Vue** (`web/static/dist`); bản vanilla cũ
 (rollback = đổi 2 route trong `app.py`, không mất code). `/next` redirect 308 về `/` cho bookmark
 cũ. Asset của bản build nằm ở `/assets/*` (mount riêng, không lẫn `/static`).
 
+**Sidebar điều khiển job đã có ở `/`** (`web/fe/src/components/ControlPanel.vue`): dán access
+token (đếm token ngay), Flow (CS/OAICS/Auto), Country, Workers (1–300), Runs/account (1–5),
+Advanced settings (Promotion, proxy riêng, Mix pool order, Proxy quality filter, Stripe session,
+Dump traffic — toàn bộ là `Switch`/`Select` của shadcn), nút **Run** (gọi `POST /api/run`) và
+**Stop job** (`POST /api/stop/{job}`). Giá trị form lưu `localStorage['upi-run-form']` (riêng
+token thì **không** lưu, tránh chạy nhầm batch cũ). Run bị disable khi chưa có token; lỗi từ
+backend (vd chặn vì đĩa còn ít) hiện ngay dưới form.
+
 Grid dày hơn: mặc định responsive **2 → 5 cột** (`sm/lg/xl/2xl`), kèm nút chọn **2–6 cột** trên
 toolbar (nhớ trong `localStorage['upi-grid-cols']`); mỗi lần vẽ 180 card rồi "Load more".
 

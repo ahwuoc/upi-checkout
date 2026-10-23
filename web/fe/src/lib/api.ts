@@ -117,13 +117,53 @@ async function getJson<T>(url: string): Promise<T> {
   return (await resp.json()) as T
 }
 
+export interface RunPayload {
+  tokens: string
+  mode: string
+  country: string
+  promo: string
+  workers: number
+  retries: number
+  proxies?: string | null
+  mix: boolean
+  filter_proxies: boolean
+  stripe_telemetry: boolean
+  dump_traffic: boolean
+}
+
+export interface RunResult {
+  job_id: string
+  total: number
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!resp.ok) {
+    let detail = resp.statusText
+    try {
+      const data = (await resp.json()) as { detail?: string | Array<{ msg?: string }> }
+      if (typeof data?.detail === 'string') detail = data.detail
+      else if (Array.isArray(data?.detail)) detail = data.detail.map((d) => d.msg || '').join('; ')
+    } catch {
+      /* body không phải JSON */
+    }
+    throw new ApiError(detail, resp.status)
+  }
+  return (await resp.json()) as T
+}
+
 export const api = {
   jobs: () => getJson<{ jobs: JobSummary[] }>('/api/jobs'),
   state: (jobId: string) => getJson<JobSnapshot>(`/api/state/${jobId}`),
-  stop: (jobId: string) => getJson<unknown>(`/api/stop/${jobId}`),
   retry: (jobId: string, taskId: string) =>
     getJson<unknown>(`/api/retry/${jobId}/${taskId}`),
   stats: () => getJson<Record<string, unknown>>('/api/stats/global'),
+  run: (payload: RunPayload) => postJson<RunResult>('/api/run', payload),
+  stop: (jobId: string) => postJson<unknown>(`/api/stop/${jobId}`, {}),
 }
 
 /** Ảnh QR / artifact đi qua server để không lộ URL Stripe ra ngoài + có cache. */

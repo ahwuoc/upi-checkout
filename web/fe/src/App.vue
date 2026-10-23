@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue' 
+import ControlPanel from '@/components/ControlPanel.vue'
 import StatsBar from '@/components/StatsBar.vue'
 import TasksPanel from '@/components/TasksPanel.vue'
 import { Moon, Sun } from '@lucide/vue'
@@ -67,9 +68,14 @@ onMounted(() => {
       </select>
     </header>
 
-    <main class="mx-auto max-w-[1600px] space-y-4 px-5 pb-10">
-      <StatsBar />
-      <TasksPanel />
+    <main class="mx-auto grid max-w-[1900px] gap-4 px-5 pb-10 lg:grid-cols-[340px_minmax(0,1fr)]">
+      <div class="lg:sticky lg:top-4 lg:self-start">
+        <ControlPanel />
+      </div>
+      <div class="min-w-0 space-y-4">
+        <StatsBar />
+        <TasksPanel />
+      </div>
     </main>
   </div>
 </template>
