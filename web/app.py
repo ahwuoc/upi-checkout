@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -117,11 +117,33 @@ def _split_tokens(raw: str) -> list[str]:
 
 
 # ------------------------------------------------------------------- static
+FE_DIST = STATIC / "dist"
+
+
+def _vue_index() -> FileResponse | None:
+    """index.html của bản Vue (nếu đã build)."""
+    f = FE_DIST / "index.html"
+    return FileResponse(f) if f.is_file() else None
+
+
 @app.get("/")
 def index() -> FileResponse:
+    """Mặc định phục vụ **bản Vue + shadcn-vue**; chưa build thì rơi về bản vanilla."""
+    vue = _vue_index()
+    if vue is not None:
+        return vue
     f = STATIC / "index.html"
     if not f.is_file():
         raise HTTPException(500, "static/index.html is missing")
+    return FileResponse(f)
+
+
+@app.get("/classic")
+def classic_index() -> FileResponse:
+    """Bản giao diện vanilla cũ — giữ để so sánh/rollback (`/classic`)."""
+    f = STATIC / "index.html"
+    if not f.is_file():
+        raise HTTPException(404, "static/index.html is missing")
     return FileResponse(f)
 
 
@@ -129,18 +151,15 @@ app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 # Bản Vue 3 + shadcn-vue (web/fe -> build ra static/dist, base '/next/').
 # Chạy SONG SONG với bản vanilla ở '/' để so sánh trước khi thay hẳn.
-FE_DIST = STATIC / "dist"
-if FE_DIST.is_dir():
-    app.mount("/next", StaticFiles(directory=str(FE_DIST), html=True), name="next")
+# Asset của bản build (`/assets/index-*.js|css`) — tách riêng để không lẫn với `/static`.
+if (FE_DIST / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=str(FE_DIST / "assets")), name="assets")
 
 
 @app.get("/next")
-def next_index() -> FileResponse:
-    """`/next` (không có dấu /) -> index của bản Vue (asset đã trỏ '/next/...')."""
-    f = FE_DIST / "index.html"
-    if not f.is_file():
-        raise HTTPException(404, "bản Vue chưa build: pnpm -C web/fe build")
-    return FileResponse(f)
+def next_index() -> RedirectResponse:
+    """Đường cũ của bản thử -> giờ bản Vue đã ở `/`; giữ redirect cho bookmark."""
+    return RedirectResponse("/", status_code=308)
 
 
 # ---------------------------------------------------------------------- api

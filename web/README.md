@@ -352,7 +352,16 @@ Nay:
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
-## Bản frontend mới: Vite + Vue 3 + TS + shadcn-vue (chạy song song ở `/next`)
+## Giao diện chính: Vite + Vue 3 + TS + shadcn-vue (ở `/`), bản cũ giữ ở `/classic`
+
+Từ 23/10, `/` phục vụ **bản Vue** (`web/static/dist`); bản vanilla cũ vẫn còn ở `/classic`
+(rollback = đổi 2 route trong `app.py`, không mất code). `/next` redirect 308 về `/` cho bookmark
+cũ. Asset của bản build nằm ở `/assets/*` (mount riêng, không lẫn `/static`).
+
+Grid dày hơn: mặc định responsive **2 → 5 cột** (`sm/lg/xl/2xl`), kèm nút chọn **2–6 cột** trên
+toolbar (nhớ trong `localStorage['upi-grid-cols']`); mỗi lần vẽ 180 card rồi "Load more".
+
+## Chi tiết bản Vue (trước đây chạy thử ở `/next`)
 
 Bản giao diện vanilla (`web/static/{index.html,app.js,style.css}`) vẫn ở `/` và **không bị thay
 đổi**. Bản dựng bằng framework nằm ở `/next` để so sánh trước khi đổi hẳn.

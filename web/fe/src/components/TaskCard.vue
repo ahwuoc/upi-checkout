@@ -70,12 +70,12 @@ async function copyLink(): Promise<void> {
   <Card
     :class="
       view === 'grid'
-        ? `gap-3 border-l-2 py-3 ${accent}`
+        ? `gap-2 border-l-2 py-2.5 ${accent}`
         : `flex-row items-center gap-4 border-l-2 py-2 ${accent}`
     "
   >
     <CardHeader :class="view === 'grid' ? 'px-3' : 'min-w-0 flex-1 px-3'">
-      <div class="flex min-w-0 items-center gap-2">
+      <div class="flex min-w-0 flex-wrap items-center gap-1.5">
         <span class="mono shrink-0 text-xs text-muted-foreground">#{{ task.index ?? task.task_id }}</span>
         <span class="truncate text-sm font-medium" :title="String(task.email || '')">
           {{ task.email || '—' }}
@@ -91,12 +91,12 @@ async function copyLink(): Promise<void> {
     </CardHeader>
 
     <CardContent :class="view === 'grid' ? 'px-3' : 'flex-1 px-3'">
-      <div v-if="view === 'grid' && qrSrc && !qrBroken" class="mb-2 flex justify-center">
+      <div v-if="view === 'grid' && qrSrc && !qrBroken" class="mb-1.5 flex justify-center">
         <div class="rounded-lg bg-white p-2">
           <img
             :src="qrSrc"
             alt="UPI QR"
-            class="size-36 object-contain"
+            class="size-28 object-contain"
             loading="lazy"
             @error="qrBroken = true"
           />
@@ -105,15 +105,18 @@ async function copyLink(): Promise<void> {
       <p v-else-if="view === 'grid' && qrSrc && qrBroken" class="mb-2 text-center text-xs text-muted-foreground">
         QR không còn khả dụng (Stripe đã xoá)
       </p>
-      <div v-if="link" class="mb-2 min-w-0">
+      <div v-if="link" class="mb-1.5 min-w-0">
         <div class="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">Payment link</div>
         <a :href="link" target="_blank" rel="noreferrer" class="truncate-link" :title="link">
           {{ link }}
         </a>
       </div>
-      <div v-else class="mb-2 flex items-center gap-1.5 text-xs text-muted-foreground">
+      <div
+        v-else-if="running || status === 'pending'"
+        class="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground"
+      >
         <QrCode class="size-3.5" />
-        {{ running ? 'Working…' : 'No payment link' }}
+        {{ running ? 'Working…' : 'Queued' }}
       </div>
 
       <div class="flex flex-wrap items-center gap-1.5">
@@ -126,7 +129,7 @@ async function copyLink(): Promise<void> {
       </div>
     </CardContent>
 
-    <CardFooter v-if="view === 'grid' && link" class="justify-end gap-1 px-3 pt-0">
+    <CardFooter v-if="view === 'grid' && link" class="justify-end gap-0.5 px-2 pt-0">
       <TooltipProvider :delay-duration="150">
         <Tooltip>
           <TooltipTrigger as-child>

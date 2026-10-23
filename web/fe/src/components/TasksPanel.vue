@@ -12,7 +12,36 @@ const desk = useDesk()
 
 // Chỉ vẽ tối đa PAGE card một lần. Job thật 6.000 task: vẽ hết sẽ tạo 6.000 DOM card và mỗi
 // lần SSE cập nhật đều phải diff hết -> treo. Bấm "Load more" để xem tiếp.
-const PAGE = 120
+const PAGE = 180
+
+// Số cột của grid. Mặc định để CSS responsive lo (2 → 6 cột theo bề rộng); người dùng bấm chọn
+// thì ghi đè bằng `grid-template-columns` (inline style) — Tailwind không hỗ trợ class động.
+const COLS_KEY = 'upi-grid-cols'
+const colOptions = [2, 3, 4, 5, 6] as const
+const cols = ref<number>(0)
+/** Bấm số cột: chuyển sang grid (nếu đang list) rồi áp số cột. */
+function pickCols(next: number): void {
+  desk.view.value = 'grid'
+  applyCols(next)
+}
+
+function applyCols(next: number): void {
+  cols.value = next
+  try {
+    localStorage.setItem(COLS_KEY, String(next))
+  } catch {
+    /* chế độ riêng tư: không lưu được thì thôi */
+  }
+}
+const gridStyle = computed(() =>
+  cols.value ? { gridTemplateColumns: `repeat(${cols.value}, minmax(0, 1fr))` } : undefined,
+)
+try {
+  const savedCols = Number(localStorage.getItem(COLS_KEY) || '0')
+  if (colOptions.includes(savedCols as 2 | 3 | 4 | 5 | 6)) cols.value = savedCols
+} catch {
+  cols.value = 0
+}
 const limit = ref(PAGE)
 watch([desk.tab, desk.query], () => {
   limit.value = PAGE
@@ -41,6 +70,20 @@ const tabs = computed<Array<{ key: TabKey; label: string; count: number }>>(() =
         <div class="relative">
           <Search class="pointer-events-none absolute top-2 left-2 size-4 text-muted-foreground" />
           <Input v-model="desk.query.value" placeholder="Search email or task ID…" class="w-64 pl-8" />
+        </div>
+        <div class="flex overflow-hidden rounded-md border">
+          <Button
+            v-for="n in colOptions"
+            :key="n"
+            variant="ghost"
+            size="icon-sm"
+            class="w-7 text-xs tabular-nums"
+            :class="cols === n && desk.view.value === 'grid' ? 'bg-accent text-accent-foreground' : ''"
+            :title="`${n} cột`"
+            @click="pickCols(n)"
+          >
+            {{ n }}
+          </Button>
         </div>
         <div class="flex overflow-hidden rounded-md border">
           <Button
@@ -80,7 +123,12 @@ const tabs = computed<Array<{ key: TabKey; label: string; count: number }>>(() =
 
     <div
       v-if="desk.visibleTasks.value.length"
-      :class="desk.view.value === 'grid' ? 'grid gap-3 md:grid-cols-2 xl:grid-cols-3' : 'flex flex-col gap-2'"
+      :class="
+        desk.view.value === 'grid'
+          ? 'grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5'
+          : 'flex flex-col gap-2'
+      "
+      :style="desk.view.value === 'grid' ? gridStyle : undefined"
     >
       <TaskCard
         v-for="task in shown"
