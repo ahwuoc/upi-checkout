@@ -20,16 +20,16 @@ const throughput = computed(() => {
 
 // Job đã xong thì SSE đóng là bình thường -> gọi là "Finished", đừng báo "Disconnected".
 const connection = computed(() => {
-  if (desk.connected.value) return { label: 'Live (SSE)', tone: 'bg-ok' }
+  if (desk.connected.value) return { label: 'Live (SSE)', tone: 'bg-chart-2' }
   if (job.value && job.value.status !== 'running') return { label: 'Finished', tone: 'bg-idle' }
-  return { label: 'Disconnected', tone: 'bg-fail' }
+  return { label: 'Disconnected', tone: 'bg-destructive' }
 })
 
 const cells = computed(() => [
   { label: 'Running', value: desk.counts.value.running, tone: 'text-foreground' },
-  { label: 'Queued', value: desk.counts.value.queued, tone: 'text-warn' },
-  { label: 'Success', value: desk.counts.value.success, tone: 'text-ok' },
-  { label: 'Failed', value: desk.counts.value.fail, tone: 'text-fail' },
+  { label: 'Queued', value: desk.counts.value.queued, tone: 'text-chart-3' },
+  { label: 'Success', value: desk.counts.value.success, tone: 'text-chart-2' },
+  { label: 'Failed', value: desk.counts.value.fail, tone: 'text-destructive' },
 ])
 </script>
 
@@ -66,7 +66,7 @@ const cells = computed(() => [
         <span class="tabular-nums">{{ done }}/{{ total }} · {{ percent }}%</span>
       </div>
       <Progress :model-value="percent" />
-      <p v-if="job?.write_error" class="text-xs text-fail">
+      <p v-if="job?.write_error" class="text-xs text-destructive">
         Không ghi được results.json: {{ job.write_error }} — hãy dọn đĩa (./clean_logs.sh --apply)
       </p>
       <Separator v-else />

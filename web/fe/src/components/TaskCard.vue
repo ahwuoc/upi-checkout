@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { Copy, ExternalLink, QrCode } from '@lucide/vue'
 import { Card, CardContent, CardFooter, CardHeader } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import StatusChip from '@/components/StatusChip.vue'
 import type { TaskState } from '@/lib/api'
 import { checkedAge, failReason, linkChip, plusChip } from '@/lib/taskView'
@@ -33,17 +34,26 @@ const chip = computed(() => linkChip(props.task))
 const plus = computed(() => plusChip(props.task, props.jobRunning === true))
 const age = computed(() => checkedAge(props.task.link_checked_at))
 const reason = computed(() => failReason(props.task))
+
+/** Tooltip: gộp note + error, bỏ dòng trùng để không hiện 2 lần cùng một câu. */
+const chipTooltip = computed(() => {
+  const parts = [String(props.task.link_note || ''), String(props.task.error || '')]
+    .map((t) => t.trim())
+    .filter(Boolean)
+  const unique = [...new Set(parts.flatMap((t) => t.split('\n').map((x) => x.trim())).filter(Boolean))]
+  return unique.join('\n')
+})
 const status = computed(() => String(props.task.status || 'pending'))
 const running = computed(() => status.value === 'running')
 
 /** Viền trái theo trạng thái — nhìn nhanh được card nào đang chạy / đã xong. */
 const accent = computed(() => {
   const s = status.value
-  if (s === 'running') return 'border-l-ring/70'
-  if (s === 'done') return link.value ? 'border-l-ok/70' : 'border-l-border'
-  if (s === 'fail') return 'border-l-fail/60'
-  if (s === 'stopped') return 'border-l-muted-foreground/40'
-  return 'border-l-border/60'
+  if (s === 'running') return 'border-l-ring'
+  if (s === 'done') return link.value ? 'border-l-chart-2/70' : 'border-l-border'
+  if (s === 'fail') return 'border-l-destructive/70'
+  if (s === 'stopped') return 'border-l-muted-foreground/50'
+  return 'border-l-border'
 })
 
 async function copyLink(): Promise<void> {
@@ -107,18 +117,34 @@ async function copyLink(): Promise<void> {
       </div>
 
       <div class="flex flex-wrap items-center gap-1.5">
-        <StatusChip :chip="chip" :suffix="age || undefined" />
-        <StatusChip v-if="plus" :chip="plus" />
+        <StatusChip
+          :chip="chip"
+          :suffix="age || undefined"
+          :title="chipTooltip || undefined"
+        />
+        <StatusChip v-if="plus" :chip="plus" :title="String(task.plus_note || '') || undefined" />
       </div>
     </CardContent>
 
     <CardFooter v-if="view === 'grid' && link" class="justify-end gap-1 px-3 pt-0">
-      <Button variant="ghost" size="icon-sm" title="Copy payment link" @click="copyLink">
-        <Copy />
-      </Button>
-      <Button variant="ghost" size="icon-sm" title="Open payment link" as="a" :href="link" target="_blank" rel="noreferrer">
-        <ExternalLink />
-      </Button>
+      <TooltipProvider :delay-duration="150">
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <Button variant="ghost" size="icon-sm" @click="copyLink">
+              <Copy />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Copy payment link</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <Button variant="ghost" size="icon-sm" as="a" :href="link" target="_blank" rel="noreferrer">
+              <ExternalLink />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Open payment link</TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
     </CardFooter>
   </Card>
 </template>

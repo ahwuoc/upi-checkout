@@ -74,7 +74,7 @@ const tabs = computed<Array<{ key: TabKey; label: string; count: number }>>(() =
       </TabsList>
     </Tabs>
 
-    <div v-if="desk.error.value" class="rounded-md border border-fail/40 bg-fail/10 px-3 py-2 text-sm text-fail">
+    <div v-if="desk.error.value" class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
       {{ desk.error.value }}
     </div>
 

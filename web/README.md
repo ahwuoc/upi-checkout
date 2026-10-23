@@ -388,8 +388,23 @@ Khác biệt có chủ đích so với bản vanilla:
 * Chip trạng thái tách 3 mức như bản vanilla: `Payment successful` / `Awaiting payment` /
   `Not verified yet` (kèm tuổi lần dò), và `Plus Success` chỉ hiện khi thật sự lên Plus.
 
-Đã kiểm bằng Chromium (Playwright): trang render, SSE `Live (SSE)`/`Finished` đúng, 8/8 card
-Success có QR decode được (với link còn hạn), không lỗi console; deep link `?job=` hoạt động.
+### Giao diện: dùng đúng shadcn-vue, **màu nguyên bản**
+
+* Component do chính CLI sinh vào `src/components/ui/` (`card`, `badge`, `button`, `input`,
+  `tabs`, `progress`, `separator`, `tooltip`, `scroll-area`) — dựa trên **reka-ui**, `cva`,
+  `cn`, Tailwind 4; không tự viết lại.
+* Bảng màu **lấy nguyên khối `:root` + `.dark` từ docs shadcn-vue** (neutral/oklch, `--radius:
+  0.625rem`, đủ `--chart-1..5`, `--sidebar-*`) — không pha màu riêng. Chip trạng thái cũng chỉ
+  dùng token có sẵn: `chart-2` (payment successful), `chart-3` (awaiting), `destructive`
+  (failed), `muted-foreground` (chưa kiểm tra).
+* **Theme switch** kiểu shadcn: class `dark` trên `<html>`, nút Mặt trời/Mặt trăng ở header,
+  mặc định theo `prefers-color-scheme`, lưu vào `localStorage['upi-theme']` (đã kiểm: reload
+  vẫn giữ). Bản light là giao diện sáng chuẩn của shadcn.
+
+Đã kiểm bằng Chromium (Playwright): trang render, SSE `Live (SSE)`/`Finished` đúng, card Success
+có QR decode được (với link còn hạn), Badge render đúng class của lib (`badgeVariants`), tooltip
+mở khi hover, theme đổi + nhớ sau reload, `body` background đúng `oklch(1 0 0)` / `oklch(0.145 0 0)`,
+không lỗi console; deep link `?job=` hoạt động.
 
 ## Vòng dò link: "Awaiting payment" không được đứng im
 
