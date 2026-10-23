@@ -142,7 +142,7 @@ def index() -> FileResponse:
     if vue is None:
         raise HTTPException(
             500,
-            "chưa build giao diện: pnpm -C web/fe install && pnpm -C web/fe build",
+            "UI not built yet: pnpm -C web/fe install && pnpm -C web/fe build",
         )
     return vue
 

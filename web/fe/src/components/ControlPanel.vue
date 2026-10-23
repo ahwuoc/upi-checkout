@@ -68,17 +68,17 @@ const tokenCount = computed(
 const jobRunning = computed(() => desk.job.value?.status === 'running')
 
 const VERDICT_LABELS: Record<string, string> = {
-  eligible: 'Đủ điều kiện',
-  plus_active: 'Đã Plus',
-  active_sub: 'Có gói',
-  banned: 'Bị khoá',
-  token_invalid: 'Token chết',
-  token_expired: 'Hết hạn/thu hồi',
-  rate_limited: 'Bị 429',
-  network_error: 'Lỗi mạng',
-  bad_token: 'Sai định dạng',
-  expired: 'Hết hạn',
-  not_eligible: 'Không đủ promo',
+  eligible: 'Eligible',
+  plus_active: 'Plus',
+  active_sub: 'Subscribed',
+  banned: 'Banned',
+  token_invalid: 'Invalid',
+  token_expired: 'Expired',
+  rate_limited: 'Rate limited',
+  network_error: 'Network',
+  bad_token: 'Malformed',
+  expired: 'Expired',
+  not_eligible: 'No promo',
 }
 function verdictLabel(verdict: string): string {
   return VERDICT_LABELS[verdict] || verdict
@@ -181,7 +181,7 @@ async function runPrefilter(tokens: string): Promise<string[]> {
 async function startJob(): Promise<void> {
   error.value = ''
   if (!tokenCount.value) {
-    error.value = 'Dán ít nhất 1 access token (mỗi dòng 1 token).'
+    error.value = 'Paste at least one access token (one per line).'
     return
   }
   starting.value = true
@@ -190,7 +190,7 @@ async function startJob(): Promise<void> {
     if (form.prefilter) {
       const kept = await runPrefilter(tokens)
       if (!kept.length) {
-        error.value = `Bộ lọc loại hết ${tokenCount.value} token — không còn acc nào đủ điều kiện để chạy.`
+        error.value = `Filter dropped all ${tokenCount.value} tokens — nothing eligible to run.`
         return
       }
       tokens = kept.join('\n')
@@ -246,7 +246,7 @@ async function stopJob(): Promise<void> {
           Access tokens
         </Label>
         <div class="flex items-center gap-1">
-          <span class="text-xs text-muted-foreground">{{ tokenCount }} token</span>
+          <span class="text-xs text-muted-foreground">{{ tokenCount }} token{{ tokenCount === 1 ? '' : 's' }}</span>
           <TooltipProvider :delay-duration="150">
             <Tooltip>
               <TooltipTrigger as-child>
@@ -262,7 +262,7 @@ async function stopJob(): Promise<void> {
                   <Copy v-else />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>{{ copied ? 'Đã copy' : 'Copy toàn bộ token' }}</TooltipContent>
+              <TooltipContent>{{ copied ? 'Copied' : 'Copy all tokens' }}</TooltipContent>
             </Tooltip>
           </TooltipProvider>
         </div>
@@ -273,7 +273,7 @@ async function stopJob(): Promise<void> {
         rows="6"
         spellcheck="false"
         class="mono max-h-52 min-h-24 text-xs"
-        placeholder="Dán token, mỗi dòng 1 cái (JWT)…"
+        placeholder="Paste tokens, one per line (JWT)…"
         @input="saveForm"
       />
     </div>
@@ -376,10 +376,10 @@ async function stopJob(): Promise<void> {
         <div>
           <Label for="prefilter" class="flex items-center gap-1.5">
             <Filter class="size-3.5 text-muted-foreground" />
-            Lọc token trước khi chạy
+            Filter tokens before run
           </Label>
           <p class="text-[11px] text-muted-foreground">
-            1 GET/token — loại acc đã Plus, bị khoá, token chết, không đủ điều kiện promo
+            1 GET/token — drops Plus accounts, banned, dead tokens, no promo
           </p>
         </div>
         <Switch id="prefilter" v-model="form.prefilter" @update:model-value="saveForm" />
@@ -396,7 +396,7 @@ async function stopJob(): Promise<void> {
         >
           <Loader2 v-if="checking" class="animate-spin" />
           <Filter v-else />
-          {{ checking ? 'Đang kiểm…' : 'Check tokens' }}
+          {{ checking ? 'Checking…' : 'Check tokens' }}
         </Button>
         <Button
           v-if="prefilter && prefilter.dropped > 0"
@@ -404,14 +404,14 @@ async function stopJob(): Promise<void> {
           variant="outline"
           @click="applyKept"
         >
-          Dùng {{ prefilter.kept }}
+          Use {{ prefilter.kept }}
         </Button>
       </div>
 
       <div v-if="prefilter" class="space-y-1">
         <div class="flex items-center justify-between text-[11px] text-muted-foreground">
-          <span>{{ prefilter.checked }}/{{ prefilter.total }} · giữ {{ prefilter.kept }}</span>
-          <span v-if="prefilter.dropped" class="text-destructive">loại {{ prefilter.dropped }}</span>
+          <span>{{ prefilter.checked }}/{{ prefilter.total }} · kept {{ prefilter.kept }}</span>
+          <span v-if="prefilter.dropped" class="text-destructive">dropped {{ prefilter.dropped }}</span>
         </div>
         <div class="h-1.5 overflow-hidden rounded-full bg-muted">
           <div
@@ -462,7 +462,7 @@ async function stopJob(): Promise<void> {
               {{ stopping ? 'Stopping…' : 'Stop job' }}
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Dừng job đang chạy (task đang xử lý sẽ kết thúc)</TooltipContent>
+          <TooltipContent>Stop the running job (in-flight task will finish)</TooltipContent>
         </Tooltip>
       </TooltipProvider>
     </div>

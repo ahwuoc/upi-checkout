@@ -43,16 +43,16 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 # Nhãn hiển thị + ý nghĩa cho từng kết luận.
 VERDICT_LABELS = {
-    "eligible": "Đủ điều kiện promo",
-    "plus_active": "Đã Plus (bỏ qua)",
-    "active_sub": "Có gói đang hoạt động (bỏ qua)",
-    "banned": "Bị khoá / deactivated",
-    "token_invalid": "Token chết (401)",
-    "token_expired": "Token hết hạn/thu hồi — cần refresh AT",
-    "rate_limited": "Bị giới hạn (429)",
-    "network_error": "Lỗi mạng/proxy (thử lại)",
-    "bad_token": "Token không hợp lệ (sai định dạng)",
-    "expired": "Token hết hạn (exp)",
+    "eligible": "Eligible for promo",
+    "plus_active": "Already Plus (skip)",
+    "active_sub": "Active subscription (skip)",
+    "banned": "Banned / deactivated",
+    "token_invalid": "Invalid token (401)",
+    "token_expired": "Token expired/revoked — refresh AT",
+    "rate_limited": "Rate limited (429)",
+    "network_error": "Network/proxy error (retry)",
+    "bad_token": "Malformed token",
+    "expired": "Token expired (exp claim)",
 }
 DROP_VERDICTS = {"plus_active", "active_sub", "banned", "token_invalid", "token_expired",
                  "bad_token", "expired"}
@@ -163,9 +163,9 @@ def classify_payload(payload: dict[str, Any], promo_id: str) -> tuple[str, str, 
     campaigns = _extract_campaigns(info.get("eligible_promo_campaigns"))
     extra = {"plan_type": plan or "free", "campaigns": campaigns}
     if not campaigns:
-        return "not_eligible", "không có campaign nào", extra
+        return "not_eligible", "no campaigns", extra
     if promo_id and not any(promo_id in c for c in campaigns):
-        return "not_eligible", f"campaign khác: {', '.join(campaigns[:3])}", extra
+        return "not_eligible", f"other campaigns: {', '.join(campaigns[:3])}", extra
     return "eligible", campaigns[0] if campaigns else promo_id, extra
 
 
@@ -380,7 +380,7 @@ def prune_stale(max_age_sec: int = 3600) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Kiểm tra token trước khi chạy (1 GET/token)")
+    ap = argparse.ArgumentParser(description="Check tokens before a run (1 GET/token)")
     ap.add_argument("--tokens-file", required=True)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--promo", default="plus-1-month-free")

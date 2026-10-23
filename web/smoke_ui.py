@@ -74,7 +74,7 @@ async def run(url: str, n_tokens: int, shot: str | None) -> int:
         await page.click("#check-tokens")
         await page.wait_for_timeout(4000)
         aside = await page.locator("aside").inner_text()
-        check("bộ lọc chạy và báo kết quả", "giữ" in aside and "loại" in aside, aside[:120])
+        check("bộ lọc chạy và báo kết quả", "kept" in aside and "dropped" in aside, aside[:120])
 
         print("3. Chạy job bằng token giả + proxy chết")
         # Token giả bị bộ lọc loại hết -> tắt bộ lọc để test phần chạy job.

@@ -370,8 +370,8 @@ class Job:
                 now_s = time.monotonic()
                 if now_s - self._last_write_warn > 30:
                     self._last_write_warn = now_s
-                    msg = (f"KHÔNG ghi được {self.results_path.name} ({self.write_error}) — "
-                           f"kết quả chỉ còn trong RAM, hãy dọn đĩa (./clean_logs.sh --apply)")
+                    msg = (f"could not write {self.results_path.name} ({self.write_error}) — "
+                           f"results are in RAM only, free disk space (./clean_logs.sh --apply)")
                     self.log_line(f"[{self.job_id}] {msg}")
                     self.emit({"type": "log", "task_id": "*", "line": msg})
                     try:
@@ -2380,8 +2380,8 @@ def _require_disk_space(tasks: int) -> None:
     free_mb = usage.free / (1024 * 1024)
     if free_mb < need_mb:
         raise ValueError(
-            f"đĩa chỉ còn {free_mb:.0f} MB (cần ≥ {need_mb} MB) — dọn trước: "
-            f"./clean_logs.sh --apply (flow log cũ + cs_state của job cũ), rồi chạy lại")
+            f"only {free_mb:.0f} MB free (need >= {need_mb} MB) — run "
+            f"./clean_logs.sh --apply first (old flow logs + cs_state of old jobs), then retry")
 
 
 def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: int,
@@ -2437,7 +2437,7 @@ def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: i
                       f"{best.get('score')} điểm, {best.get('country')}, risk={best.get('risk')}, "
                       f"{best.get('user_type')}, {str(best.get('isp'))[:32]} "
                       f"({best.get('latency_ms')}ms)"
-                      + (f" | loại {quality['excluded']} proxy chết/cờ xấu"
+                      + (f" | dropped {quality['excluded']} dead/flagged proxies"
                          if quality.get("excluded") else "")
                       + (f" | thiếu {quality['short']} -> sinh bù {gen.get('verified')} proxy "
                          f"mới (session {gen.get('sess_minutes')} phút, {gen.get('attempts')} lần thử, "

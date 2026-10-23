@@ -56,7 +56,7 @@ function startedLabel(iso?: string): string {
             </span>
           </span>
         </span>
-        <span v-else class="text-sm text-muted-foreground">Chưa có batch</span>
+        <span v-else class="text-sm text-muted-foreground">No batch yet</span>
         <ChevronDown class="size-4 shrink-0 text-muted-foreground" />
       </Button>
     </PopoverTrigger>
@@ -74,8 +74,8 @@ function startedLabel(iso?: string): string {
             :class="j.job_id === current?.job_id ? 'bg-accent/60' : ''"
             @click="desk.openJob(j.job_id)"
           >
-            <!-- Cụm trái: id · status · ✓ok/total · ✗fail. Mọi ô đều nowrap để hàng không
-                 bị xuống dòng lệch cột (trước đây "19 / 5939" bị tách làm 2 dòng). -->
+            <!-- Left cluster: id · status · ✓ok/total · ✗fail. Every cell is nowrap so the
+                 row never wraps and shifts the columns (previously "19 / 5939" broke in two). -->
             <span class="flex min-w-0 items-center gap-2.5 whitespace-nowrap">
               <span class="mono w-[92px] shrink-0 truncate text-xs" :title="j.job_id">
                 {{ j.job_id }}

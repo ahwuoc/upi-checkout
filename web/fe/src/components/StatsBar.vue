@@ -67,7 +67,7 @@ const cells = computed(() => [
       </div>
       <Progress :model-value="percent" />
       <p v-if="job?.write_error" class="text-xs text-destructive">
-        Không ghi được results.json: {{ job.write_error }} — hãy dọn đĩa (./clean_logs.sh --apply)
+        Could not write results.json: {{ job.write_error }} — free disk space (./clean_logs.sh --apply)
       </p>
       <Separator v-else />
     </div>

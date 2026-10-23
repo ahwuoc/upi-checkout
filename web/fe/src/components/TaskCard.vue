@@ -103,7 +103,7 @@ async function copyLink(): Promise<void> {
         </div>
       </div>
       <p v-else-if="view === 'grid' && qrSrc && qrBroken" class="mb-2 text-center text-xs text-muted-foreground">
-        QR không còn khả dụng (Stripe đã xoá)
+        QR no longer available (deleted by Stripe)
       </p>
       <div v-if="link" class="mb-1.5 min-w-0">
         <div class="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">Payment link</div>

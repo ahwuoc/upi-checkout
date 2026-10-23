@@ -383,9 +383,9 @@ proxy** khi TLS lỗi (proxy đầu SSLError là chuyện thường gặp với 
 
 Dùng:
 
-* Sidebar → công tắc **“Lọc token trước khi chạy”** (mặc định bật) + nút **Check tokens**;
-  kết quả hiện `giữ N / loại M` + badge theo lý do, nút **Dùng N** thay ô token bằng acc đủ điều
-  kiện. Bật công tắc thì bấm **Run** sẽ lọc trước rồi mới chạy; lọc hết sạch thì báo lỗi và
+* Sidebar → công tắc **“Filter tokens before run”** (mặc định bật) + nút **Check tokens**;
+  kết quả hiện `kept N / dropped M` + badge theo lý do, nút **Use N** thay ô token bằng acc đủ
+  điều kiện. Bật công tắc thì bấm **Run** sẽ lọc trước rồi mới chạy; lọc hết sạch thì báo lỗi và
   **không tạo job**.
 * API: `POST /api/prefilter {tokens, workers, proxies}` → `{id}`; poll `GET /api/prefilter/{id}`
   (`checked/kept/dropped/counts/results[]` có `index` để map lại token); `POST /api/prefilter/{id}/stop`.

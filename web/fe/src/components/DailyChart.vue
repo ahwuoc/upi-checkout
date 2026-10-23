@@ -85,7 +85,7 @@ onMounted(async () => {
     <CardContent class="px-4">
       <p v-if="error" class="text-xs text-destructive">{{ error }}</p>
       <div v-else-if="!days.length" class="py-6 text-center text-xs text-muted-foreground">
-        Chưa có dữ liệu ngày nào.
+        No daily data yet.
       </div>
       <TooltipProvider v-else :delay-duration="100">
         <div class="flex h-28 items-end gap-1.5">
