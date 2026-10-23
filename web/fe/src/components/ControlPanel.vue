@@ -6,7 +6,7 @@
  * các cờ thử nghiệm, nút Run/Stop. Toàn bộ giá trị lưu vào localStorage để mở lại không mất.
  */
 import { computed, onMounted, reactive, ref } from 'vue'
-import { Loader2, Play, Square, TerminalSquare } from '@lucide/vue'
+import { Loader2, Play, Square } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -263,15 +263,6 @@ async function stopJob(): Promise<void> {
             </Button>
           </TooltipTrigger>
           <TooltipContent>Dừng job đang chạy (task đang xử lý sẽ kết thúc)</TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger as-child>
-            <Button variant="link" size="sm" class="w-full" as="a" href="/classic">
-              <TerminalSquare />
-              Mở giao diện cũ (/classic)
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent>Bản vanilla vẫn giữ đủ mọi tính năng</TooltipContent>
         </Tooltip>
       </TooltipProvider>
     </div>

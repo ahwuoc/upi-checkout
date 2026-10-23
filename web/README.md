@@ -364,7 +364,8 @@ Advanced settings (Promotion, proxy riêng, Mix pool order, Proxy quality filter
 Dump traffic — toàn bộ là `Switch`/`Select` của shadcn), nút **Run** (gọi `POST /api/run`) và
 **Stop job** (`POST /api/stop/{job}`). Giá trị form lưu `localStorage['upi-run-form']` (riêng
 token thì **không** lưu, tránh chạy nhầm batch cũ). Run bị disable khi chưa có token; lỗi từ
-backend (vd chặn vì đĩa còn ít) hiện ngay dưới form.
+backend (vd chặn vì đĩa còn ít) hiện ngay dưới form. Bản vanilla vẫn mở được bằng URL
+`/classic` khi cần đối chiếu (không còn nút trong sidebar).
 
 Grid dày hơn: mặc định responsive **2 → 5 cột** (`sm/lg/xl/2xl`), kèm nút chọn **2–6 cột** trên
 toolbar (nhớ trong `localStorage['upi-grid-cols']`); mỗi lần vẽ 180 card rồi "Load more".
