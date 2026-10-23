@@ -6,7 +6,7 @@
  * các cờ thử nghiệm, nút Run/Stop. Toàn bộ giá trị lưu vào localStorage để mở lại không mất.
  */
 import { computed, onMounted, reactive, ref } from 'vue'
-import { Loader2, Play, Square } from '@lucide/vue'
+import { Check, Copy, KeyRound, Loader2, Play, Square } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -49,6 +49,8 @@ const form = reactive({
 })
 
 const starting = ref(false)
+const copied = ref(false)
+let copyTimer: ReturnType<typeof setTimeout> | null = null
 const stopping = ref(false)
 const error = ref('')
 const advanced = ref(false)
@@ -70,6 +72,29 @@ onMounted(() => {
     /* localStorage hỏng/không có -> dùng mặc định */
   }
 })
+
+/** Copy đúng những token đang có trong ô (đã trim, bỏ dòng trống) để dán sang nơi khác. */
+async function copyTokens(): Promise<void> {
+  const text = form.tokens
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n')
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    // Không có quyền clipboard (http không phải localhost): chọn text để user tự Ctrl+C.
+    const area = document.getElementById('tokens') as HTMLTextAreaElement | null
+    area?.select()
+    return
+  }
+  copied.value = true
+  if (copyTimer) clearTimeout(copyTimer)
+  copyTimer = setTimeout(() => {
+    copied.value = false
+  }, 1500)
+}
 
 function saveForm(): void {
   try {
@@ -133,9 +158,32 @@ async function stopJob(): Promise<void> {
 <template>
   <aside class="space-y-4 rounded-xl border bg-card p-4 text-card-foreground">
     <div class="space-y-1.5">
-      <div class="flex items-center justify-between">
-        <Label for="tokens">Access tokens</Label>
-        <span class="text-xs text-muted-foreground">{{ tokenCount }} token</span>
+      <div class="flex items-center justify-between gap-2">
+        <Label for="tokens" class="flex items-center gap-1.5">
+          <KeyRound class="size-3.5 text-muted-foreground" />
+          Access tokens
+        </Label>
+        <div class="flex items-center gap-1">
+          <span class="text-xs text-muted-foreground">{{ tokenCount }} token</span>
+          <TooltipProvider :delay-duration="150">
+            <Tooltip>
+              <TooltipTrigger as-child>
+                <Button
+                  id="copy-tokens"
+                  variant="ghost"
+                  size="icon-xs"
+                  :disabled="!tokenCount"
+                  :aria-label="copied ? 'Copied' : 'Copy tokens'"
+                  @click="copyTokens"
+                >
+                  <Check v-if="copied" class="text-chart-2" />
+                  <Copy v-else />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{{ copied ? 'Đã copy' : 'Copy toàn bộ token' }}</TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
+        </div>
       </div>
       <Textarea
         id="tokens"

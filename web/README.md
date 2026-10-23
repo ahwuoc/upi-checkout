@@ -380,7 +380,8 @@ tô `--chart-1`, các ngày khác `--chart-2`, hover ra tooltip (ngày / code / 
 Màu **lấy nguyên token shadcn**, không pha opacity.
 
 **Sidebar điều khiển job đã có ở `/`** (`web/fe/src/components/ControlPanel.vue`): dán access
-token (đếm token ngay), Flow (CS/OAICS/Auto), Country, Workers (1–300), Runs/account (1–5),
+token (có icon 🔑, đếm token ngay, nút **Copy** toàn bộ token đã trim — đổi sang ✓ 1,5 s sau khi
+copy), Flow (CS/OAICS/Auto), Country, Workers (1–300), Runs/account (1–5),
 Advanced settings (Promotion, proxy riêng, Mix pool order, Proxy quality filter, Stripe session,
 Dump traffic — toàn bộ là `Switch`/`Select` của shadcn), nút **Run** (gọi `POST /api/run`) và
 **Stop job** (`POST /api/stop/{job}`). Giá trị form lưu `localStorage['upi-run-form']` (riêng
