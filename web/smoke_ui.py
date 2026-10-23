@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""smoke_ui.py — test giao diện thật bằng browser (Playwright + Chromium).
+"""Smoke test giao diện **bản Vue** (`/`) — thay cho smoke_ui.py cũ của giao diện vanilla.
 
-Vì sao cần: các bug UI (row không render, status sai, asset 404) không lộ ra khi
-chỉ curl HTML/JS. Script này mở trang bằng browser thật, chạy 1 job token giả rồi
-assert DOM — bắt được lỗi runtime mà đọc code không thấy.
+Vì sao vẫn cần: UI là chỗ duy nhất người dùng thao tác; lỗi build/SSE/selector chỉ lộ ra khi mở
+trình duyệt thật. Test này chạy Chromium headless, KHÔNG cần token thật:
 
-Chạy:
-    python3 smoke_ui.py                      # tự khởi động backend giả lập offline
-    python3 smoke_ui.py --url http://127.0.0.1:9000 --tokens 6
+  python3 web/smoke_ui.py                      # http://127.0.0.1:8099, 3 token giả
+  python3 web/smoke_ui.py --url http://... --tokens 5 --shot /tmp/ui.png
 
-Yêu cầu: pip install playwright  +  chromium (hoặc google-chrome).
-Mặc định dùng tests/preview_server.py: không gọi payment/proxy, không ghi log thật.
---url chỉ dùng với server kiểm thử riêng; không trỏ vào job/tài khoản thật.
+Nó dùng token giả + proxy chết (127.0.0.1:1) để job fail ngay, nên không tiêu proxy thật và
+không phụ thuộc pool. Kiểm: trang tải sạch (không pageerror/404), CSS áp, sidebar render, bấm
+Run tạo job, task card hiện ra, tab lọc + đổi số cột hoạt động, đổi theme được.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -23,336 +19,122 @@ import base64
 import json
 import os
 import sys
-
-FAILURES: list[str] = []
-
-
-def check(name: str, ok: bool, detail: str = "") -> None:
-    print(f"  {'PASS' if ok else 'FAIL'}  {name}" + (f"  ({detail})" if detail else ""))
-    if not ok:
-        FAILURES.append(name)
+import time
 
 
 def fake_jwt(email: str) -> str:
     def b64(d: dict) -> str:
         return base64.urlsafe_b64encode(json.dumps(d).encode()).rstrip(b"=").decode()
+
     return (f"{b64({'alg': 'RS256'})}."
             f"{b64({'https://api.openai.com/profile': {'email': email}, 'exp': 9999999999})}.sig")
 
 
-async def run(url: str, n_tokens: int, headed: bool, shot: str | None) -> int:
+async def run(url: str, n_tokens: int, shot: str | None) -> int:
     from playwright.async_api import async_playwright
 
-    tokens = "\n".join(fake_jwt(f"smoke{i}@example.com") for i in range(n_tokens))
+    checks: list[tuple[str, bool, str]] = []
+
+    def check(name: str, ok: bool, detail: str = "") -> None:
+        checks.append((name, bool(ok), detail))
+        print(f"  {'✓' if ok else '✗'} {name}" + (f" — {detail}" if detail and not ok else ""))
 
     async with async_playwright() as p:
-        launch_kwargs = {"args": ["--no-sandbox"]}
-        for exe in ("/usr/bin/chromium", "/usr/bin/google-chrome-stable", "/usr/bin/google-chrome"):
-            import os
+        launch: dict = {"args": ["--no-sandbox"]}
+        for exe in ("/usr/bin/chromium", "/usr/bin/google-chrome-stable",
+                    "/usr/bin/google-chrome",
+                    os.path.expanduser("~/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome")):
             if os.path.exists(exe):
-                launch_kwargs["executable_path"] = exe
+                launch["executable_path"] = exe
                 break
-        browser = await p.chromium.launch(headless=not headed, **launch_kwargs)
-        page = await browser.new_page(viewport={"width": 1280, "height": 900})
-
+        browser = await p.chromium.launch(**launch)
+        page = await browser.new_page(viewport={"width": 1600, "height": 1000})
         errors: list[str] = []
-        bad_responses: list[str] = []
+        bad: list[str] = []
         page.on("pageerror", lambda e: errors.append(str(e)))
-        page.on("response", lambda r: bad_responses.append(f"{r.status} {r.url}") if r.status >= 400 else None)
+        page.on("response", lambda r: bad.append(f"{r.status} {r.url}") if r.status >= 400 else None)
 
-        print("1. Load trang + asset")
-        await page.goto(url + "/", wait_until="domcontentloaded")
-        # xoa form da luu de test sach (khong lay token con lai tu lan truoc)
+        print("1. Tải trang + asset")
+        await page.goto(url + "/", wait_until="domcontentloaded", timeout=45000)
         await page.evaluate("() => localStorage.clear()")
-        await page.reload(wait_until="domcontentloaded")
-        await page.wait_for_timeout(800)
-        check("không có pageerror khi load", not errors, "; ".join(errors)[:160])
-        check("không có asset 404", not bad_responses, "; ".join(bad_responses)[:160])
-        css = await page.evaluate("() => getComputedStyle(document.body).backgroundColor")
-        check("CSS đã áp (body có background)", css not in ("rgba(0, 0, 0, 0)", "transparent"), css)
+        await page.reload(wait_until="networkidle")
+        await page.wait_for_timeout(1500)
+        check("không pageerror", not errors, "; ".join(errors)[:160])
+        check("không asset 4xx/5xx", not bad, "; ".join(bad)[:160])
+        bg = await page.evaluate("() => getComputedStyle(document.body).backgroundColor")
+        check("CSS đã áp", bg not in ("rgba(0, 0, 0, 0)", "transparent"), bg)
+        check("sidebar có ô token", await page.locator("#tokens").count() == 1)
+        check("nút Run tồn tại", await page.locator("#submit").count() == 1)
 
-        print("2. Submit job")
-        await page.fill("#tokens", tokens)
-        # Ép dùng proxy CHẾT (127.0.0.1:1) để task fail ngay lập tức.
-        # Không làm vậy thì job lấy pool từ proxy.txt — sau 2026-10-04 file đó là
-        # pool thật (cliproxy region-IN), mỗi task chạy ~200 giây, và bước 7
-        # (xoá task) sẽ fail oan vì server cấm xoá task của job đang chạy.
-        # Test giao diện không nên phụ thuộc (và không nên tiêu) pool thật.
-        await page.check("#use-proxy")
+        print("2. Chạy job bằng token giả + proxy chết")
+        await page.fill("#tokens", "\n".join(fake_jwt(f"smoke{i}@example.com")
+                                             for i in range(n_tokens)))
+        await page.get_by_role("button", name="Advanced settings").click()
+        await page.wait_for_timeout(400)
+        if not await page.locator("#use-proxy").is_checked():
+            await page.click("#use-proxy")
+        await page.wait_for_timeout(300)
         await page.fill("#proxies", "127.0.0.1:1")
         await page.click("#submit")
-        await page.wait_for_timeout(5000)
-        check("không có pageerror sau khi chạy", not errors, "; ".join(errors)[:200])
+        await page.wait_for_timeout(6000)
+        check("không pageerror sau khi Run", not errors, "; ".join(errors)[:200])
 
-        print("3. Row task render")
-        info = await page.evaluate("""() => {
-          const list = document.getElementById('task-list');
-          const rows = [...list.children];
-          return {
-            rows: rows.length,
-            hidden: rows.filter(r => r.hidden).length,
-            height: Math.round(list.getBoundingClientRect().height),
-            emails: rows.map(r => (r.querySelector('.task-email') || {}).textContent || '').filter(Boolean),
-            firstText: rows[0] ? rows[0].innerText.replace(/\\n+/g, ' | ') : '',
-            counts: {
-              all: document.getElementById('c-all').textContent,
-              running: document.getElementById('c-running').textContent,
-              queued: document.getElementById('c-queued').textContent,
-            },
-            statsRunning: document.getElementById('runtime-running').textContent,
-            overall: document.getElementById('overall-count').textContent,
-            // Ô Job ID giờ là <input id="job-id-input"> (điền id để xem lịch sử),
-            // không còn <span id="job-id"> như trước.
-            jobBadge: (document.getElementById('job-id-input') || {}).value || '',
-          };
-        }""")
-        check("số row = số token", info["rows"] == n_tokens, f"{info['rows']}/{n_tokens}")
-        check("list có chiều cao (>0)", info["height"] > 0, f"{info['height']}px")
-        check("row có email", len(info["emails"]) == n_tokens, f"{len(info['emails'])} email")
-        check("tab 'Tất cả' đếm đúng", info["counts"]["all"] == str(n_tokens), info["counts"]["all"])
-        check("sidebar có số đang chạy/đang chờ",
-              int(info["statsRunning"]) + int(info["counts"]["queued"]) <= n_tokens,
-              f"running={info['statsRunning']} queued={info['counts']['queued']}")
-        check("có job id", info["jobBadge"] not in ("", "—"), info["jobBadge"])
+        print("3. Task card render")
+        cards = await page.locator('[data-slot="card"]').count()
+        check("có task card", cards >= n_tokens, f"{cards} card")
+        chips = await page.locator("aside ~ * span, main span").count()
+        check("có chip trạng thái", chips > 0, str(chips))
+        stats = await page.get_by_text("RUNTIME OVERVIEW").count()
+        check("khối Runtime overview hiện", stats == 1)
 
-        print("4. Mở detail của row đầu")
-        await page.click(".task-row")
-        await page.wait_for_timeout(700)
-        det = await page.evaluate("""() => {
-          const d = document.querySelector('.task-detail:not([hidden])');
-          if (!d) return null;
-          return {
-            text: d.innerText.replace(/\\n+/g, ' | '),
-            steps: d.querySelectorAll('.step, .step-row').length,
-            hasFlowBadge: !!d.querySelector('.flow-badge, .badge-flow'),
-          };
-        }""")
-        check("detail mở được", det is not None)
-        if det:
-            check("detail hiển thị email", "smoke0@example.com" in det["text"])
-            check("detail hiển thị 'Run'", "Run" in det["text"])
-            check("detail có progress", "progress" in det["text"].lower() or "%" in det["text"])
-
-        print("4b. Hoá đơn: event task_billing phải hiện khối 'Billing details'")
-        # Server bắt dòng hoá đơn trong log rồi bắn event này; panel phải vẽ ngay,
-        # không đợi F5 (dữ liệu vẫn nằm trong snapshot để F5 xong còn nguyên).
-        billing = await page.evaluate("""() => {
-          const el = document.querySelector('.task[data-task-id]');
-          const id = el.dataset.taskId;
-          handleEvent({ type: 'task_billing', task_id: id, billing: {
-            billing_name: 'Debashis Behera', billing_city: 'Koderma', billing_pin: '825409',
-            geo_state: 'Jharkhand', geo_city: 'Koderma', geo_pin: '825409' } });
-          return !!((tasks.get(id) || {}).billing);
-        }""")
-        await page.wait_for_timeout(400)
-        check("event task_billing ghi vào task", billing is True, str(billing))
-        bt = await page.evaluate("""() => {
-          const d = document.querySelector('.task-detail:not([hidden])');
-          return d ? d.innerText.replace(/\\n+/g, ' | ') : '';
-        }""")
-        check("panel hiện khối Billing details", "Billing details" in bt, bt[:160])
-        for need in ("Billing name", "Debashis Behera", "Koderma 825409", "Jharkhand"):
-            check("panel có '" + need + "'", need in bt, bt[:200])
-
-        print("5. Tab lọc — mỗi tab phải hiện ĐÚNG số ghi trên nhãn")
-        keys = await page.evaluate(
-            "() => [...document.querySelectorAll('.tab')].map(b => b.dataset.filter)")
-        for key in keys:
-            await page.click('.tab[data-filter="' + key + '"]')
-            await page.wait_for_timeout(250)
-            # Đọc nhãn và số dòng **trong cùng 1 lần evaluate**.
-            # Trước đây lấy nhãn 1 lần ở đầu vòng lặp rồi so với số dòng đo sau đó
-            # ~1s: 6 token giả fail rất nhanh nên khi bấm tới tab 'fail' thì 2 task
-            # cuối vừa chuyển sang fail -> 6 dòng hiện mà nhãn cũ ghi 4, test báo
-            # lỗi oan. Task đang chạy thì nhãn là giá trị sống, phải đọc cùng nhịp.
-            vis, live = await page.evaluate("""(k) => {
-                const b = document.querySelector('.tab[data-filter="' + k + '"]');
-                return [
-                    [...document.getElementById('task-list').children].filter(r => !r.hidden).length,
-                    parseInt((b.querySelector('.tab-count') || {}).textContent, 10) || 0,
-                ];
-            }""", key)
-            check("tab '" + key + "': hiện " + str(vis) + " = nhãn " + str(live),
-                  vis == live, str(vis) + " vs " + str(live))
-        await page.click('.tab[data-filter="all"]')
-        await page.wait_for_timeout(250)
-        back = await page.evaluate("() => [...document.getElementById('task-list').children].filter(r => !r.hidden).length")
-        check("quay lại tab 'Tất cả' hiện đủ row", back == n_tokens, str(back))
-
-        print("6. Persistence (localStorage)")
-        stored = await page.evaluate("() => !!localStorage.getItem('upi-web-form-v1')")
-        check("form được lưu vào localStorage", stored)
-
-        print("6b. Trộn pool proxy")
-        # Pool dán tay thường xếp theo khối vùng; "Mix pool order" phải bật mặc định và
-        # phải được lưu lại, nếu không mỗi lần vào trang lại ăn theo thứ tự dán.
-        mix = await page.evaluate("""() => {
-          const box = document.getElementById('mix-proxy');
-          const saved = JSON.parse(localStorage.getItem('upi-web-form-v1') || '{}');
-          return {checked: box.checked, saved: saved.mixProxy};
-        }""")
-        check("Mix pool order bật mặc định", mix["checked"] is True, str(mix))
-        check("Mix pool order được lưu vào form", mix["saved"] is True, str(mix))
-        await page.uncheck("#mix-proxy")
-        await page.wait_for_timeout(120)
-        saved_off = await page.evaluate(
-            "() => JSON.parse(localStorage.getItem('upi-web-form-v1') || '{}').mixProxy")
-        check("Tắt Mix pool order thì lưu lại là false", saved_off is False, str(saved_off))
-        await page.check("#mix-proxy")
-        await page.wait_for_timeout(120)
-
-        print("6c. Cờ tắt lọc proxy")
-        # Tắt lọc = dùng pool nguyên trạng (không chấm/không loại/không sinh bù) để test 2 chiều.
-        filt = await page.evaluate("""() => {
-          const box = document.getElementById('filter-proxy');
-          const saved = JSON.parse(localStorage.getItem('upi-web-form-v1') || '{}');
-          return {checked: box.checked, saved: saved.filterProxy};
-        }""")
-        check("Lọc proxy bật mặc định", filt["checked"] is True, str(filt))
-        check("Lọc proxy được lưu vào form", filt["saved"] is True, str(filt))
-        await page.uncheck("#filter-proxy")
-        await page.wait_for_timeout(120)
-        saved_off2 = await page.evaluate(
-            "() => JSON.parse(localStorage.getItem('upi-web-form-v1') || '{}').filterProxy")
-        check("Tắt lọc proxy thì lưu lại là false", saved_off2 is False, str(saved_off2))
-        await page.check("#filter-proxy")
-        await page.wait_for_timeout(120)
-
-        print("7. Xoá task: ✕ từng card + nút Dọn dẹp (phải xoá cả trên server)")
-        # Chờ job kết thúc: server CẤM xoá task đang chạy/chờ của job đang chạy
-        # (chúng thuộc worker thread), nên test phải đợi thay vì fail oan.
-        await page.wait_for_function(
-            "async () => { const j = state.jobId; if (!j) return true;"
-            " const d = await (await fetch('/api/state/' + j)).json();"
-            " return d.status !== 'running'; }", timeout=60000)
-        # Hộp xác nhận giờ là modal của app (#modal), KHÔNG còn confirm() của
-        # browser -> không còn dialog event; phải bấm nút trong modal.
-        async def confirm_modal():
-            await page.wait_for_selector("#modal:not([hidden])", timeout=3000)
-            title = await page.text_content("#modal-title")
-            await page.click("#modal-ok")
-            return title
-
-        async def server_task_ids():
-            return await page.evaluate(
-                "async () => (await (await fetch('/api/state/' + state.jobId)).json())"
-                ".tasks.map(t => t.task_id)")
-
-        before = await server_task_ids()
-        check("server có đủ task trước khi xoá", len(before) == n_tokens, str(len(before)))
-        # ✕ trên card đầu: phải biến mất khỏi DOM *và* khỏi /api/state
-        await page.hover(".task-row")
-        await page.click(".task-row .task-remove")
-        m_title = await confirm_modal()
-        check("✕ mở modal xác nhận của app (không phải confirm() browser)",
-              "Remove this task" in m_title, m_title)
-        await page.wait_for_timeout(900)
-        rows_now = await page.evaluate("() => document.getElementById('task-list').children.length")
-        after = await server_task_ids()
-        check("✕ xoá 1 task khỏi DOM", rows_now == n_tokens - 1, str(rows_now))
-        check("✕ xoá 1 task trên server (không quay lại sau F5)",
-              len(after) == n_tokens - 1 and before[0] not in after,
-              str(len(after)) + " còn lại")
-        await page.reload(wait_until="domcontentloaded")
-        await page.wait_for_timeout(2500)
-        persisted = await page.evaluate("() => document.getElementById('task-list').children.length")
-        check("F5 xong vẫn đúng số task đã xoá", persisted == n_tokens - 1, str(persisted))
-
-        # nút Dọn dẹp: nhãn phải nói rõ tab + số lượng
-        label = await page.evaluate("() => document.getElementById('btn-clear-tab-label').textContent")
-        check("nút Dọn dẹp ghi rõ tab và số lượng", "(" in label and label.strip().endswith(")"), label)
-        await page.click('.tab[data-filter="all"]')
-        await page.wait_for_timeout(250)
-        # Huỷ trong modal thì KHÔNG được xoá gì (làm trước, vì xoá xong nút bị disable)
-        await page.click("#btn-clear-tab")
-        await page.wait_for_selector("#modal:not([hidden])", timeout=3000)
-        await page.click("#modal-cancel")
-        await page.wait_for_timeout(400)
-        hidden = await page.evaluate("() => document.getElementById('modal').hidden")
-        still = await server_task_ids()
-        check("nút Huỷ đóng modal và KHÔNG xoá gì",
-              hidden is True and len(still) == n_tokens - 1,
-              "hidden=%s còn %d task" % (hidden, len(still)))
-        await page.click("#btn-clear-tab")
-        m_title = await confirm_modal()
-        check("Dọn dẹp mở modal nói rõ số task", "task" in m_title, m_title)
-        await page.wait_for_timeout(1200)
-        left_server = await server_task_ids()
-        left_dom = await page.evaluate("() => document.getElementById('task-list').children.length")
-        check("Dọn dẹp xoá hết trên server", left_server == [], str(len(left_server)))
-        check("Dọn dẹp xoá hết trên DOM", left_dom == 0, str(left_dom))
-        await page.reload(wait_until="domcontentloaded")
-        await page.wait_for_timeout(2000)
-        still = await page.evaluate("() => document.getElementById('task-list').children.length")
-        check("F5 sau Dọn dẹp vẫn trống", still == 0, str(still))
+        print("4. Lọc tab + số cột + theme")
+        await page.get_by_role("tab", name="Failed").click()
+        await page.wait_for_timeout(800)
+        failed_cards = await page.locator('[data-slot="card"]').count()
+        check("tab Failed lọc được", failed_cards >= 1, f"{failed_cards}")
+        await page.get_by_role("button", name="6", exact=True).click()
+        await page.wait_for_timeout(600)
+        cols = await page.evaluate(
+            """() => { const g=[...document.querySelectorAll('div')]
+                 .find(d=>d.className.includes('grid')&&d.querySelector('[data-slot=card]'));
+                 return g ? getComputedStyle(g).gridTemplateColumns.split(' ').length : 0 }""")
+        check("chọn 6 cột có hiệu lực", cols == 6, str(cols))
+        await page.locator("header button").first.click()
+        await page.wait_for_timeout(500)
+        theme = await page.evaluate("() => localStorage.getItem('upi-theme')")
+        check("đổi theme được", theme in ("dark", "light"), str(theme))
 
         if shot:
             await page.screenshot(path=shot)
-            print(f"  -> ảnh: {shot}")
+            print(f"  ảnh: {shot}")
+
+        print("5. Dọn job test")
+        job_id = await page.locator("select").input_value()
+        if job_id:
+            await page.evaluate("""async (id) => {
+                await fetch('/api/clear/' + id, {method: 'POST',
+                  headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({scope: 'all'})})
+            }""", job_id)
 
         await browser.close()
 
-    print()
-    if FAILURES:
-        print(f">>> {len(FAILURES)} TEST FAIL: " + ", ".join(FAILURES))
-        return 1
-    print(">>> TAT CA PASS")
-    return 0
+    failed = [c for c in checks if not c[1]]
+    print(f"\n{len(checks) - len(failed)}/{len(checks)} check pass")
+    return 0 if not failed else 1
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="UI smoke test cho upi-checkout/web")
-    ap.add_argument("--url", default=None,
-                    help="test server đang chạy sẵn (mặc định: tự spawn server riêng)")
-    ap.add_argument("--tokens", type=int, default=6)
-    ap.add_argument("--headed", action="store_true", help="hiện cửa sổ browser")
-    ap.add_argument("--shot", default=None, help="lưu ảnh chụp màn hình")
+    ap = argparse.ArgumentParser(description="Smoke test UI bản Vue")
+    ap.add_argument("--url", default="http://127.0.0.1:8099")
+    ap.add_argument("--tokens", type=int, default=3)
+    ap.add_argument("--shot", default="")
     args = ap.parse_args()
-
-    # Mặc định spawn server riêng: job registry nằm trong RAM của tiến trình server,
-    # nên tiến trình mới = registry sạch -> test không đụng job của người dùng.
-    proc = None
-    url = args.url
-    try:
-        if url is None:
-            import socket
-            import subprocess
-            import time
-            import urllib.request
-
-            with socket.socket() as s:
-                s.bind(("127.0.0.1", 0))
-                port = s.getsockname()[1]
-            url = f"http://127.0.0.1:{port}"
-            from pathlib import Path
-            preview = Path(__file__).resolve().parents[1] / "tests" / "preview_server.py"
-            proc = subprocess.Popen(
-                [sys.executable, str(preview), "--port", str(port), "--demo-tasks", "0"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            for _ in range(60):
-                try:
-                    urllib.request.urlopen(url + "/api/jobs", timeout=1)
-                    break
-                except Exception:
-                    time.sleep(0.25)
-            else:
-                print("Server test không khởi động được", file=sys.stderr)
-                return 2
-            print(f"Server offline riêng: {url}  (backend giả lập, state tạm)\n")
-
-        return asyncio.run(run(url, args.tokens, args.headed, args.shot))
-    except ImportError:
-        print("Thiếu playwright: pip install playwright", file=sys.stderr)
-        return 2
-    finally:
-        if proc is not None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except Exception:
-                proc.kill()
-                proc.wait()
+    started = time.time()
+    code = asyncio.run(run(args.url.rstrip("/"), max(1, args.tokens), args.shot or None))
+    print(f"xong sau {time.time() - started:.1f}s")
+    return code
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())

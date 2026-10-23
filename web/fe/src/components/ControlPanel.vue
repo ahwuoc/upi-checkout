@@ -199,6 +199,7 @@ async function stopJob(): Promise<void> {
         </div>
         <Textarea
           v-if="form.useProxy"
+          id="proxies"
           v-model="form.proxies"
           rows="3"
           spellcheck="false"
@@ -249,7 +250,7 @@ async function stopJob(): Promise<void> {
         {{ tokenCount }} task{{ tokenCount === 1 ? '' : 's' }} × {{ form.retries }} run{{ Number(form.retries) === 1 ? '' : 's' }}
         · {{ Math.max(1, Math.min(MAX_WORKERS, Number(form.workers) || 1)) }} workers
       </p>
-      <Button class="w-full" :disabled="starting || !tokenCount" @click="startJob">
+      <Button id="submit" class="w-full" :disabled="starting || !tokenCount" @click="startJob">
         <Loader2 v-if="starting" class="animate-spin" />
         <Play v-else />
         {{ starting ? 'Starting…' : `Run ${tokenCount || ''} task${tokenCount === 1 ? '' : 's'}` }}
@@ -257,7 +258,13 @@ async function stopJob(): Promise<void> {
       <TooltipProvider :delay-duration="150">
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button variant="destructive" class="w-full" :disabled="!jobRunning || stopping" @click="stopJob">
+            <Button
+              id="stop"
+              variant="destructive"
+              class="w-full"
+              :disabled="!jobRunning || stopping"
+              @click="stopJob"
+            >
               <Square />
               {{ stopping ? 'Stopping…' : 'Stop job' }}
             </Button>

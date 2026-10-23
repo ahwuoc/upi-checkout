@@ -128,26 +128,15 @@ def _vue_index() -> FileResponse | None:
 
 @app.get("/")
 def index() -> FileResponse:
-    """Mặc định phục vụ **bản Vue + shadcn-vue**; chưa build thì rơi về bản vanilla."""
+    """Giao diện duy nhất: bản Vue + shadcn-vue (`web/fe` -> `web/static/dist`)."""
     vue = _vue_index()
-    if vue is not None:
-        return vue
-    f = STATIC / "index.html"
-    if not f.is_file():
-        raise HTTPException(500, "static/index.html is missing")
-    return FileResponse(f)
+    if vue is None:
+        raise HTTPException(
+            500,
+            "chưa build giao diện: pnpm -C web/fe install && pnpm -C web/fe build",
+        )
+    return vue
 
-
-@app.get("/classic")
-def classic_index() -> FileResponse:
-    """Bản giao diện vanilla cũ — giữ để so sánh/rollback (`/classic`)."""
-    f = STATIC / "index.html"
-    if not f.is_file():
-        raise HTTPException(404, "static/index.html is missing")
-    return FileResponse(f)
-
-
-app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 # Bản Vue 3 + shadcn-vue (web/fe -> build ra static/dist, base '/next/').
 # Chạy SONG SONG với bản vanilla ở '/' để so sánh trước khi thay hẳn.

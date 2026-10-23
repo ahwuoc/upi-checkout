@@ -352,11 +352,12 @@ Nay:
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
-## Giao diện chính: Vite + Vue 3 + TS + shadcn-vue (ở `/`), bản cũ giữ ở `/classic`
+## Giao diện: Vite + Vue 3 + TS + shadcn-vue (chỉ còn một bản, ở `/`)
 
-Từ 23/10, `/` phục vụ **bản Vue** (`web/static/dist`); bản vanilla cũ vẫn còn ở `/classic`
-(rollback = đổi 2 route trong `app.py`, không mất code). `/next` redirect 308 về `/` cho bookmark
-cũ. Asset của bản build nằm ở `/assets/*` (mount riêng, không lẫn `/static`).
+`/` phục vụ bản Vue (`web/fe` → `web/static/dist`), asset ở `/assets/*`. Giao diện vanilla cũ
+(`static/index.html` + `app.js` + `style.css` + `notify.mp3`) và route `/classic` **đã xoá**;
+`/next` chỉ còn redirect 308 về `/` cho bookmark cũ. Muốn xem lại bản cũ thì lấy từ git history
+(commit trước `4bd621d`).
 
 **Sidebar điều khiển job đã có ở `/`** (`web/fe/src/components/ControlPanel.vue`): dán access
 token (đếm token ngay), Flow (CS/OAICS/Auto), Country, Workers (1–300), Runs/account (1–5),
@@ -364,8 +365,7 @@ Advanced settings (Promotion, proxy riêng, Mix pool order, Proxy quality filter
 Dump traffic — toàn bộ là `Switch`/`Select` của shadcn), nút **Run** (gọi `POST /api/run`) và
 **Stop job** (`POST /api/stop/{job}`). Giá trị form lưu `localStorage['upi-run-form']` (riêng
 token thì **không** lưu, tránh chạy nhầm batch cũ). Run bị disable khi chưa có token; lỗi từ
-backend (vd chặn vì đĩa còn ít) hiện ngay dưới form. Bản vanilla vẫn mở được bằng URL
-`/classic` khi cần đối chiếu (không còn nút trong sidebar).
+backend (vd chặn vì đĩa còn ít) hiện ngay dưới form. Bản vanilla đã xoá hẳn; nếu cần đối chiếu thì lấy lại từ git history.
 
 Grid dày hơn: mặc định responsive **2 → 5 cột** (`sm/lg/xl/2xl`), kèm nút chọn **2–6 cột** trên
 toolbar (nhớ trong `localStorage['upi-grid-cols']`); mỗi lần vẽ 180 card rồi "Load more".
