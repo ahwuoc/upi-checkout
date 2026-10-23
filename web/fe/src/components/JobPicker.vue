@@ -46,7 +46,7 @@ function startedLabel(iso?: string): string {
       <Button variant="outline" class="h-auto w-[330px] justify-between gap-2 py-1.5">
         <span v-if="current" class="flex min-w-0 flex-1 flex-col items-start gap-0.5">
           <span class="mono text-xs text-muted-foreground">#{{ current.job_id }} · {{ current.status }}</span>
-          <span class="flex items-center gap-2 text-sm">
+          <span class="flex items-center gap-2 whitespace-nowrap text-sm">
             <span class="flex items-center gap-1 font-medium text-chart-2">
               <Check class="size-3.5" />{{ okCount(current) }}
             </span>
@@ -60,7 +60,7 @@ function startedLabel(iso?: string): string {
         <ChevronDown class="size-4 shrink-0 text-muted-foreground" />
       </Button>
     </PopoverTrigger>
-    <PopoverContent class="w-[420px] p-0" align="end">
+    <PopoverContent class="w-[470px] p-0" align="end">
       <div class="border-b px-3 py-2">
         <p class="text-xs font-medium">Batches</p>
         <p class="text-[11px] text-muted-foreground">{{ desk.jobs.value.length }} batch gần nhất</p>
@@ -70,22 +70,31 @@ function startedLabel(iso?: string): string {
           <button
             v-for="j in desk.jobs.value"
             :key="j.job_id"
-            class="flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-left hover:bg-accent"
+            class="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent"
             :class="j.job_id === current?.job_id ? 'bg-accent/60' : ''"
             @click="desk.openJob(j.job_id)"
           >
-            <span class="mono w-24 shrink-0 truncate text-xs" :title="j.job_id">{{ j.job_id }}</span>
-            <span class="w-16 shrink-0 text-[11px] text-muted-foreground">{{ j.status }}</span>
-            <span class="flex flex-1 items-center gap-2 text-xs tabular-nums">
-              <span class="flex items-center gap-1 font-medium text-chart-2">
-                <Check class="size-3" />{{ okCount(j) }}
+            <!-- Cụm trái: id · status · ✓ok/total · ✗fail. Mọi ô đều nowrap để hàng không
+                 bị xuống dòng lệch cột (trước đây "19 / 5939" bị tách làm 2 dòng). -->
+            <span class="flex min-w-0 items-center gap-2.5 whitespace-nowrap">
+              <span class="mono w-[92px] shrink-0 truncate text-xs" :title="j.job_id">
+                {{ j.job_id }}
               </span>
-              <span class="text-muted-foreground">/ {{ totalCount(j) }}</span>
-              <span v-if="failCount(j)" class="flex items-center gap-1 text-destructive">
-                <X class="size-3" />{{ failCount(j) }}
+              <span class="w-[52px] shrink-0 text-[11px] text-muted-foreground">{{ j.status }}</span>
+              <span class="flex shrink-0 items-center gap-1 text-xs font-medium tabular-nums text-chart-2">
+                <Check class="size-3 shrink-0" />{{ okCount(j) }}
+              </span>
+              <span class="shrink-0 text-xs tabular-nums text-muted-foreground">
+                / {{ totalCount(j) }}
+              </span>
+              <span
+                v-if="failCount(j)"
+                class="flex shrink-0 items-center gap-1 text-xs tabular-nums text-destructive"
+              >
+                <X class="size-3 shrink-0" />{{ failCount(j) }}
               </span>
             </span>
-            <span class="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+            <span class="text-right text-[11px] tabular-nums whitespace-nowrap text-muted-foreground">
               {{ startedLabel(j.started_at) }}
             </span>
           </button>

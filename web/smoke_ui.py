@@ -108,7 +108,9 @@ async def run(url: str, n_tokens: int, shot: str | None) -> int:
             print(f"  ảnh: {shot}")
 
         print("5. Dọn job test")
-        job_id = await page.locator("select").input_value()
+        job_id = await page.evaluate(
+            """() => new URL(window.location.href).searchParams.get('job') || ''"""
+        )
         if job_id:
             await page.evaluate("""async (id) => {
                 await fetch('/api/clear/' + id, {method: 'POST',
