@@ -21,6 +21,7 @@ const job = shallowRef<JobSnapshot | null>(null)
 const tasks = reactive(new Map<string, TaskState>())
 const order = ref<string[]>([])
 const connected = ref(false)
+const stopping = ref(false)
 const loading = ref(false)
 const error = ref('')
 const tab = ref<TabKey>('all')
@@ -36,6 +37,7 @@ function patchTask(taskId: string, patch: Record<string, unknown>): void {
 
 function applySnapshot(snapshot: JobSnapshot): void {
   job.value = snapshot
+  stopping.value = Boolean(snapshot.stop_requested) && String(snapshot.status || '') === 'running'
   const list = Array.isArray(snapshot.tasks) ? snapshot.tasks : []
   const seen = new Set<string>()
   for (const task of list) {
@@ -65,7 +67,14 @@ function handleEvent(ev: StreamEvent): void {
         }
       }
       break
+    case 'job_stopping':
+      // Server đã nhận lệnh Stop; task đang chạy còn phải kết thúc (hoặc dừng ở checkpoint
+      // kế tiếp), task trong hàng đợi sẽ bị bỏ. UI phải nói rõ trạng thái này, nếu không
+      // người dùng bấm Stop mà thấy "Running" không đổi thì tưởng nút không tác dụng.
+      stopping.value = true
+      break
     case 'job_done':
+      stopping.value = false
       void refreshJobs()
       break
     case 'task_done':
@@ -265,6 +274,11 @@ const visibleTasks = computed<TaskState[]>(() => {
   return out
 })
 
+/** ControlPanel gọi ngay sau khi bấm Stop (optimistic) / khi API lỗi để trả lại trạng thái. */
+export function setStopping(next: boolean): void {
+  stopping.value = next
+}
+
 export function useDesk() {
   return {
     jobs,
@@ -272,6 +286,7 @@ export function useDesk() {
     tasks,
     order,
     connected,
+    stopping,
     loading,
     error,
     tab,

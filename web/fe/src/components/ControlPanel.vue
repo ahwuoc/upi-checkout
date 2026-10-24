@@ -28,7 +28,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { api, ApiError, type PrefilterStatus, type RunPayload } from '@/lib/api'
 import { useNotifySound } from '@/composables/useNotifySound'
-import { useDesk } from '@/composables/useDesk'
+import { setStopping, useDesk } from '@/composables/useDesk'
 
 const desk = useDesk()
 const sound = useNotifySound()
@@ -262,11 +262,16 @@ async function startJob(): Promise<void> {
 async function stopJob(): Promise<void> {
   const jobId = desk.job.value?.job_id
   if (!jobId) return
+  error.value = ''
   stopping.value = true
+  setStopping(true)
   try {
     await api.stop(jobId)
   } catch (exc) {
-    error.value = exc instanceof Error ? exc.message : String(exc)
+    // 400 "job is not running" = job đã dừng/xong từ trước, không phải lỗi của người dùng.
+    const message = exc instanceof Error ? exc.message : String(exc)
+    if (!/not running|does not exist/i.test(message)) error.value = message
+    setStopping(false)
   } finally {
     stopping.value = false
   }
@@ -521,6 +526,17 @@ async function stopJob(): Promise<void> {
       <p v-if="prefilterError" class="text-[11px] text-destructive">{{ prefilterError }}</p>
     </div>
 
+    <div
+      v-if="desk.stopping.value || stopping"
+      class="rounded-md border border-chart-3/40 bg-chart-3/10 px-3 py-2 text-xs"
+    >
+      <p class="font-medium text-chart-3">Stopping…</p>
+      <p class="text-muted-foreground">
+        {{ desk.job.value?.running || 0 }} task(s) still finishing; queued tasks will be skipped.
+        The job shows “stopped” when the last one is done.
+      </p>
+    </div>
+
     <p v-if="error" class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
       {{ error }}
     </p>
@@ -530,7 +546,12 @@ async function stopJob(): Promise<void> {
         {{ tokenCount }} task{{ tokenCount === 1 ? '' : 's' }} × {{ form.retries }} run{{ Number(form.retries) === 1 ? '' : 's' }}
         · {{ Math.max(1, Math.min(MAX_WORKERS, Number(form.workers) || 1)) }} workers
       </p>
-      <Button id="submit" class="w-full" :disabled="starting || !tokenCount" @click="startJob">
+      <Button
+        id="submit"
+        class="w-full"
+        :disabled="starting || !tokenCount || desk.stopping.value"
+        @click="startJob"
+      >
         <Loader2 v-if="starting" class="animate-spin" />
         <Play v-else />
         {{ starting ? 'Starting…' : `Run ${tokenCount || ''} task${tokenCount === 1 ? '' : 's'}` }}
@@ -542,11 +563,11 @@ async function stopJob(): Promise<void> {
               id="stop"
               variant="destructive"
               class="w-full"
-              :disabled="!jobRunning || stopping"
+              :disabled="!jobRunning || stopping || desk.stopping.value"
               @click="stopJob"
             >
               <Square />
-              {{ stopping ? 'Stopping…' : 'Stop job' }}
+              {{ stopping || desk.stopping.value ? 'Stopping…' : 'Stop job' }}
             </Button>
           </TooltipTrigger>
           <TooltipContent>Stop the running job (in-flight task will finish)</TooltipContent>

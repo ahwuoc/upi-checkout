@@ -75,6 +75,7 @@ export interface JobSnapshot {
   started_at?: string
   stop_reason?: string
   write_error?: string
+  stop_requested?: boolean
   tasks?: TaskState[]
 }
 

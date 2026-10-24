@@ -352,6 +352,22 @@ Nay:
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
+## Nút Stop: vì sao "trông như không tác dụng" và đã sửa gì
+
+Bấm Stop **vẫn gửi `POST /api/stop/{job}` và server nhận** (`stop_requested=true`), nhưng trước
+đây UI **không hiện gì** nên tưởng nút hỏng. Thực tế:
+
+* Task **đang chạy** không thể cắt giữa một request HTTP; nó dừng ở **checkpoint kế tiếp**
+  (`extract_cs.check_cancelled()` thấy `should_stop` → `FlowCancelled`) — thường vài giây, nhưng
+  có request treo tới hàng chục giây.
+* Task **trong hàng đợi** chỉ được đánh dấu `stopped` khi một worker nhấc nó lên (mỗi lần rất
+  nhanh, nhưng với 300 worker và 6.000 task vẫn cần vài vòng).
+
+Sửa ở UI (commit sau `fb92209`): nghe event `job_stopping` và hiện ngay banner
+**“Stopping… N task(s) still finishing; queued tasks will be skipped”**, nút Stop đổi thành
+**Stopping…** và bị khoá, nút Run cũng khoá; job xong thì banner tự biến mất và status = stopped.
+Bấm Stop lần hai (job đã dừng) không còn hiện lỗi 400 — coi như đã dừng.
+
 ## Bộ lọc token trước khi chạy (`web/prefilter.py`)
 
 **Endpoint dùng để check promo (lấy từ repo tham khảo `gpt-auto-register-main`, hàm `check_plus`)**:
