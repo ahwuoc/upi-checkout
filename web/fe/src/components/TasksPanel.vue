@@ -18,6 +18,7 @@ const PAGE = 180
 // thì ghi đè bằng `grid-template-columns` (inline style) — Tailwind không hỗ trợ class động.
 const COLS_KEY = 'upi-grid-cols'
 const colOptions = [2, 3, 4, 5, 6] as const
+const DEFAULT_COLS = 4
 const cols = ref<number>(0)
 /** Bấm số cột: chuyển sang grid (nếu đang list) rồi áp số cột. */
 function pickCols(next: number): void {
@@ -38,9 +39,9 @@ const gridStyle = computed(() =>
 )
 try {
   const savedCols = Number(localStorage.getItem(COLS_KEY) || '0')
-  if (colOptions.includes(savedCols as 2 | 3 | 4 | 5 | 6)) cols.value = savedCols
+  cols.value = colOptions.includes(savedCols as 2 | 3 | 4 | 5 | 6) ? savedCols : DEFAULT_COLS
 } catch {
-  cols.value = 0
+  cols.value = DEFAULT_COLS
 }
 const limit = ref(PAGE)
 watch([desk.tab, desk.query], () => {
@@ -127,8 +128,8 @@ const tabs = computed<Array<{ key: TabKey; label: string; count: number }>>(() =
       data-testid="task-grid"
       :class="
         desk.view.value === 'grid'
-          ? 'grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5'
-          : 'flex flex-col gap-2'
+          ? 'grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-4'
+          : 'flex flex-col gap-1.5'
       "
       :style="desk.view.value === 'grid' ? gridStyle : undefined"
     >

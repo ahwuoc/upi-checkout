@@ -214,27 +214,27 @@ async function copyLink(): Promise<void> {
   <Card
     :class="
       view === 'grid'
-        ? `gap-2 border-l-2 py-2.5 ${accent}`
-        : `flex-row items-center gap-4 border-l-2 py-2 ${accent}`
+        ? `relative gap-1.5 border-l-2 py-2 ${accent}`
+        : `relative flex-row items-center gap-3 border-l-2 py-1.5 ${accent}`
     "
   >
-    <CardHeader :class="view === 'grid' ? 'px-3' : 'min-w-0 flex-1 px-3'">
-      <div class="flex min-w-0 flex-wrap items-center gap-1.5">
+    <span
+      v-if="doneClock"
+      class="mono absolute top-1.5 right-2 text-[10px] tabular-nums text-muted-foreground"
+      :title="doneTitle"
+    >
+      {{ doneClock }}
+    </span>
+    <CardHeader :class="view === 'grid' ? 'px-2.5' : 'min-w-0 flex-1 px-2.5'">
+      <div class="flex min-w-0 flex-wrap items-center gap-1.5 pr-12">
         <span class="mono shrink-0 text-xs text-muted-foreground">#{{ task.index ?? task.task_id }}</span>
-        <span class="truncate text-sm font-medium" :title="String(task.email || '')">
+        <span class="truncate text-xs font-medium" :title="String(task.email || '')">
           {{ task.email || '—' }}
         </span>
         <span class="shrink-0 rounded border border-border px-1 text-[10px] text-muted-foreground">
           {{ String(task.provider || 'UPI').toUpperCase() }}
         </span>
-        <span class="shrink-0 text-[11px] text-muted-foreground">₹0.00</span>
-        <span
-          v-if="doneClock"
-          class="mono ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground"
-          :title="doneTitle"
-        >
-          {{ doneClock }}
-        </span>
+        
       </div>
       <p v-if="reason && status === 'fail'" class="mt-1 truncate text-xs text-destructive" :title="String(task.error || '')">
         {{ reason }}
@@ -248,13 +248,13 @@ async function copyLink(): Promise<void> {
       </p>
     </CardHeader>
 
-    <CardContent :class="view === 'grid' ? 'px-3' : 'flex-1 px-3'">
-      <div v-if="view === 'grid' && qrSrc && !qrBroken" class="mb-1.5 flex justify-center">
+    <CardContent :class="view === 'grid' ? 'px-2.5' : 'flex-1 px-2.5'">
+      <div v-if="view === 'grid' && qrSrc && !qrBroken" class="mb-1 flex justify-center">
         <div class="rounded-lg bg-white p-2">
           <img
             :src="qrSrc"
             alt="UPI QR"
-            class="size-28 object-contain"
+            class="size-24 object-contain"
             loading="lazy"
             @error="qrBroken = true"
           />
@@ -263,9 +263,9 @@ async function copyLink(): Promise<void> {
       <p v-else-if="view === 'grid' && qrSrc && qrBroken" class="mb-2 text-center text-xs text-muted-foreground">
         QR no longer available (deleted by Stripe)
       </p>
-      <div v-if="link" class="mb-1.5 min-w-0">
-        <div class="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">Payment link</div>
-        <a :href="link" target="_blank" rel="noreferrer" class="truncate-link" :title="link">
+      <div v-if="link" class="mb-1 min-w-0">
+        <div class="text-[9px] font-medium tracking-wide text-muted-foreground uppercase">Payment link</div>
+        <a :href="link" target="_blank" rel="noreferrer" class="truncate-link text-xs" :title="link">
           {{ link }}
         </a>
       </div>
@@ -277,7 +277,7 @@ async function copyLink(): Promise<void> {
         {{ running ? 'Working…' : 'Queued' }}
       </div>
 
-      <div class="flex flex-wrap items-center gap-1.5">
+      <div class="flex flex-wrap items-center gap-1">
         <StatusChip
           :chip="chip"
           :suffix="age || undefined"
@@ -358,7 +358,7 @@ async function copyLink(): Promise<void> {
             <div
               v-for="[label, value] in billingRows"
               :key="label"
-              class="flex gap-2 text-[11px] leading-snug"
+              class="flex gap-2 text-[10px] leading-snug"
             >
               <span class="w-[92px] shrink-0 text-muted-foreground">{{ label }}</span>
               <span class="min-w-0 break-words">{{ value }}</span>
@@ -371,7 +371,7 @@ async function copyLink(): Promise<void> {
             <div
               v-for="[label, value] in egressRows"
               :key="label"
-              class="flex gap-2 text-[11px] leading-snug"
+              class="flex gap-2 text-[10px] leading-snug"
             >
               <span class="w-[92px] shrink-0 text-muted-foreground">{{ label }}</span>
               <span class="mono min-w-0 break-words">{{ value }}</span>
@@ -381,7 +381,7 @@ async function copyLink(): Promise<void> {
       </div>
     </CardContent>
 
-    <CardFooter v-if="view === 'grid' && link" class="justify-end gap-0.5 px-2 pt-0">
+    <CardFooter v-if="view === 'grid' && link" class="justify-end gap-0.5 px-2 pt-0 pb-0">
       <TooltipProvider :delay-duration="150">
         <Tooltip>
           <TooltipTrigger as-child>

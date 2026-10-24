@@ -352,6 +352,15 @@ Nay:
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
+## Card gọn, grid 4 cột (mặc định)
+
+* Grid mặc định **4 cột** (chọn 2–6 vẫn được, nhớ trong `localStorage['upi-grid-cols']`);
+  responsive `sm:2 → lg:3 → xl:4`.
+* Card gọn lại: padding `px-2.5 / py-2`, email `text-xs`, QR 96 px, link `text-xs`, khoảng cách
+  chip/hàng nhỏ hơn, bỏ số `₹0.00` lặp lại (mọi task đều ₹0), **giờ xong `HH:MM:SS` ghim ở góc
+  trên-phải** (không chiếm dòng, header chừa `pr-12` để không đè email).
+* Đo lại: card cao **134 px** (trước 157–200 px), 4 cột ở 1600 px.
+
 ## Thứ tự trong danh sách: theo lúc trích xuất (cũ → mới)
 
 Tab Success/Failed/Skipped/Stopped sắp theo `done_at` **tăng dần** (cái ra trước nằm trên),
@@ -527,7 +536,7 @@ Dump traffic — toàn bộ là `Switch`/`Select` của shadcn), nút **Run** (g
 token thì **không** lưu, tránh chạy nhầm batch cũ). Run bị disable khi chưa có token; lỗi từ
 backend (vd chặn vì đĩa còn ít) hiện ngay dưới form. Bản vanilla đã xoá hẳn; nếu cần đối chiếu thì lấy lại từ git history.
 
-Grid dày hơn: mặc định responsive **2 → 5 cột** (`sm/lg/xl/2xl`), kèm nút chọn **2–6 cột** trên
+Grid dày hơn: mặc định 4 cột (responsive 2/3/4) (`sm/lg/xl/2xl`), kèm nút chọn **2–6 cột** trên
 toolbar (nhớ trong `localStorage['upi-grid-cols']`); mỗi lần vẽ 180 card rồi "Load more".
 
 ## Chi tiết bản Vue (trước đây chạy thử ở `/next`)
