@@ -466,12 +466,10 @@ Nay **giữ nguyên như bản cũ**: tab Success = **mọi task có link** (k�
 * **Copy AT**: nút copy nằm ngay cạnh số lượng token ở header *Access tokens* (icon 📋, cạnh
   `N tokens`) — copy toàn bộ token đang có (đã trim, bỏ dòng trống), xong đổi sang ✓ xanh 1,5 s;
   bị disable khi ô rỗng; không có quyền clipboard thì tự bôi đen text để Ctrl+C.
-* **Token KHÔNG tự lưu** (mặc định): `localStorage` chỉ giữ cấu hình form (flow, country,
-  workers, proxy…) trong `upi-run-form`; token bị bỏ ra ngoài để tránh chạy nhầm batch cũ và
-  tránh để AT nằm lại trong trình duyệt.
-* **Muốn giữ token**: bật **Advanced settings → Remember tokens** (mặc định TẮT). Khi bật,
-  token được lưu ở `localStorage['upi-tokens']` và tự khôi phục sau khi reload; tắt là xoá ngay
-  khỏi máy.
+* **Token được NHỚ mặc định** (từ bản `upi-run-form-v2`): dán AT xong reload vẫn còn. Lưu ở
+  `localStorage['upi-tokens']`, cấu hình form ở `localStorage['upi-run-form-v2']`.
+* **Tắt**: Advanced settings → **Remember tokens** (mặc định BẬT) → xoá token khỏi máy ngay và
+  reload sẽ rỗng. (Trước đây mặc định TẮT nên mỗi lần reload là mất AT.)
 
 ## Card task hiển thị đủ Billing details + Progress (steps)
 

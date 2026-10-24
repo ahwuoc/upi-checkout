@@ -33,7 +33,7 @@ import { setStopping, useDesk } from '@/composables/useDesk'
 const desk = useDesk()
 const sound = useNotifySound()
 
-const FORM_KEY = 'upi-run-form'
+const FORM_KEY = 'upi-run-form-v2'
 const TOKENS_KEY = 'upi-tokens'
 const MAX_WORKERS = 300
 
@@ -53,7 +53,9 @@ const form = reactive({
   prefilter: true,
   filterLimit: 200,
   filterWorkers: 16,
-  rememberTokens: false,
+  // Mặc định BẬT: người dùng muốn dán AT xong reload không bị mất. Tắt được bằng công tắc
+  // trong Advanced settings (khi đó token bị xoá khỏi máy ngay).
+  rememberTokens: true,
 })
 
 const starting = ref(false)
@@ -241,6 +243,7 @@ async function startJob(): Promise<void> {
   starting.value = true
   try {
     sound.unlockAudio()
+    saveForm()
     const payload: RunPayload = {
       tokens: form.tokens,
       mode: form.mode,
