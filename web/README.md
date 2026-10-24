@@ -410,6 +410,15 @@ Token **không** nằm trong snapshot/`results.json` (1 JWT ~2 KB × 6.000 task 
 và token sẽ nằm lại trên đĩa), nên job đã bị desk restart thì endpoint trả 404 kèm lý do
 (“token không lưu ra đĩa”) — UI hiện toast lỗi đúng câu đó.
 
+## Toast bị kẹt dưới đáy màn hình — đã sửa
+
+Triệu chứng: toast hiện ở đáy *document* (chỉ thấy 1 dòng bị cắt) thay vì góc phải dưới viewport.
+Nguyên nhân: **thiếu CSS của `vue-sonner`** (`import 'vue-sonner/style.css'`) nên `<ol
+data-sonner-toaster>` không có `position: fixed`; và component shadcn truyền `:style` (biến CSS)
+sẽ ghi đè style inline của lib. Đã sửa: import CSS trong `main.ts`, bỏ binding `:style` trong
+`Sonner.vue`, chuyển biến CSS sang `style.css` (`[data-sonner-toaster] {…}`).
+Kiểm lại: `position: fixed`, toast nằm trong viewport (bottom 840 / vh 860).
+
 ## Tab Success = link CÒN SỐNG (không tính link đã chết)
 
 Trước đây tab Success tính mọi task **có link**, nên một task tạo được link nhưng uỷ nhiệm

@@ -125,3 +125,18 @@
     @apply block truncate text-sm text-primary underline-offset-2 hover:underline;
   }
 }
+
+/* Toast (vue-sonner): khai báo biến ở CSS thay vì :style để không ghi đè
+   position: fixed / bottom / right do lib đặt inline. */
+[data-sonner-toaster] {
+  --normal-bg: var(--popover);
+  --normal-text: var(--popover-foreground);
+  --normal-border: var(--border);
+  --border-radius: var(--radius);
+  z-index: 9999;
+  pointer-events: none;
+}
+
+[data-sonner-toaster] [data-sonner-toast] {
+  pointer-events: auto;
+}

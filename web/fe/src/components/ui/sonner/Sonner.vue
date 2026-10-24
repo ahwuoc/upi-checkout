@@ -8,14 +8,11 @@ const props = defineProps<ToasterProps>()
 </script>
 
 <template>
+  <!-- KHÔNG truyền :style ở đây: vue-sonner đặt position:fixed bằng style inline, binding
+       :style của mình sẽ ghi đè và toast rơi xuống đáy document (đã gặp: toast kẹt dưới màn
+       hình, chỉ thấy 1 dòng). Biến CSS chuyển sang style.css ([data-sonner-toaster]). -->
   <Sonner
     :class="cn('toaster group', props.class)"
-    :style="{
-      '--normal-bg': 'var(--popover)',
-      '--normal-text': 'var(--popover-foreground)',
-      '--normal-border': 'var(--border)',
-      '--border-radius': 'var(--radius)',
-    }"
     v-bind="props"
   >
     <template #success-icon>
