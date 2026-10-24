@@ -14,6 +14,7 @@ import {
   type TaskState,
 } from '@/lib/api'
 import { hasLink, matchesTab, type TabKey } from '@/lib/taskView'
+import { playSuccessSound } from '@/composables/useNotifySound'
 
 const jobs = ref<JobSummary[]>([])
 const job = shallowRef<JobSnapshot | null>(null)
@@ -99,6 +100,8 @@ function handleEvent(ev: StreamEvent): void {
       if (taskId) patchTask(taskId, { artifact: ev.artifact })
       break
     case 'task_link':
+      // Có link vừa chuyển sang trạng thái thành công -> kêu 1 tiếng (như bản vanilla).
+      if (String(ev.link_state || '') === 'succeeded') playSuccessSound()
       if (taskId) {
         patchTask(taskId, {
           link_state: ev.link_state,

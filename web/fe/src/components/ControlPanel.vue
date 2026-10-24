@@ -6,7 +6,7 @@
  * các cờ thử nghiệm, nút Run/Stop. Toàn bộ giá trị lưu vào localStorage để mở lại không mất.
  */
 import { computed, onMounted, reactive, ref } from 'vue'
-import { Check, Copy, Filter, KeyRound, Loader2, Play, Square } from '@lucide/vue'
+import { Bell, BellOff, Check, Copy, Filter, KeyRound, Loader2, Play, Square } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -27,9 +27,11 @@ import {
 import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { api, ApiError, type PrefilterStatus, type RunPayload } from '@/lib/api'
+import { useNotifySound } from '@/composables/useNotifySound'
 import { useDesk } from '@/composables/useDesk'
 
 const desk = useDesk()
+const sound = useNotifySound()
 
 const FORM_KEY = 'upi-run-form'
 const MAX_WORKERS = 300
@@ -225,6 +227,7 @@ async function startJob(): Promise<void> {
   }
   starting.value = true
   try {
+    sound.unlockAudio()
     const payload: RunPayload = {
       tokens: form.tokens,
       mode: form.mode,
@@ -367,7 +370,7 @@ async function stopJob(): Promise<void> {
           rows="3"
           spellcheck="false"
           class="mono text-xs"
-          placeholder="host:port:user:pass — mỗi dòng 1 proxy (trống = proxy.txt)"
+          placeholder="host:port:user:pass — one proxy per line (empty = proxy.txt)"
           @input="saveForm"
         />
 
@@ -392,6 +395,21 @@ async function stopJob(): Promise<void> {
               <p class="text-[11px] text-muted-foreground">Real muid/guid/sid instead of made-up</p>
             </div>
             <Switch id="telemetry" v-model="form.stripeTelemetry" @update:model-value="saveForm" />
+          </div>
+          <div class="flex items-center justify-between gap-2">
+            <div>
+              <Label for="sound" class="flex items-center gap-1.5">
+                <Bell v-if="sound.enabled.value" class="size-3.5 text-muted-foreground" />
+                <BellOff v-else class="size-3.5 text-muted-foreground" />
+                Sound on success
+              </Label>
+              <p class="text-[11px] text-muted-foreground">Chime when a link becomes successful</p>
+            </div>
+            <Switch
+              id="sound"
+              :model-value="sound.enabled.value"
+              @update:model-value="sound.setSoundEnabled($event === true)"
+            />
           </div>
           <div class="flex items-center justify-between gap-2">
             <div>

@@ -179,7 +179,7 @@ class Task:
             for s in steps
         ]
 
-    def to_dict(self, log_tail: int = 50) -> dict:
+    def to_dict(self, log_tail: int = 50, copy_nested: bool = False) -> dict:
         if self.flow:
             flow_label = FLOW_LABEL[self.flow]
         else:
@@ -194,15 +194,17 @@ class Task:
             "flow_label": flow_label,
             "session": self.session,
             "provider": self.provider,
-            "steps": self.steps,
+            "steps": ([dict(step) for step in self.steps] if copy_nested else self.steps),
             "status": self.status,
             "raw_status": self.raw_status,
             "error": self.error,
             "skipped_reason": self.skipped_reason,
             "duration_ms": self.duration_ms,
             "run": self.run,
-            "egress": self.egress,
-            "artifact": self.artifact,
+            "egress": (dict(self.egress) if copy_nested and isinstance(self.egress, dict)
+                       else self.egress),
+            "artifact": (dict(self.artifact) if copy_nested and isinstance(self.artifact, dict)
+                         else self.artifact),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "done_at": self.done_at,
@@ -226,7 +228,7 @@ class Task:
             "billing_name": self.billing_name,
             "billing_city": self.billing_city,
             "billing_pin": self.billing_pin,
-            "logs": self.logs[-max(0, log_tail):] if log_tail else [],
+            "logs": (list(self.logs[-max(0, log_tail):]) if log_tail else []),
         }
 
 
@@ -352,39 +354,43 @@ class Job:
                           f"total={event.get('total')} {event.get('duration_ms')}ms")
 
     def write_results(self, *, checkpoint: bool = False) -> None:
-        """Ghi snapshot cuoi cung ra file JSON (doc lap voi RAM)."""
-        # Serialize writers and atomically replace: history readers never see
-        # half a JSON document, including concurrent completion/removal.
+        """Ghi snapshot cuối cùng ra file JSON (độc lập với RAM).
+
+        Snapshot được lấy TRONG lock (nhanh), còn serialize + ghi file làm NGOÀI lock: với job
+        6.000 task, `json.dumps` tốn ~0,1-0,3 s; giữ lock suốt lúc đó sẽ chặn mọi worker đang
+        cần `_finish` -> số task "Running" tụt xuống dưới số worker đã đặt.
+        """
         with self._lock:
             now = time.monotonic()
             if checkpoint and now - self._last_checkpoint < CHECKPOINT_SECS:
                 return
-            try:
-                temp = self.results_path.with_suffix(".json.tmp")
-                temp.write_text(json.dumps(self.snapshot(), ensure_ascii=False,
-                                           separators=(",", ":")), encoding="utf-8")
-                temp.replace(self.results_path)
-                _write_headline({"job_id": self.job_id, "status": self.status,
-                                 "total": self.total, "done": self.done, "ok": self.ok,
-                                 "fail": self.fail, "skipped": self.skipped,
-                                 "started_at": self.started_at})
-                self._last_checkpoint = now
-            except OSError as exc:
-                # TRƯỚC ĐÂY: `pass` -> đĩa đầy mà không ai biết, desk chạy tiếp và TOÀN BỘ kết
-                # quả sau checkpoint cuối chỉ nằm trong RAM (đo thật 19/10: job 1de13e494e07
-                # đĩa đầy từ 22:46, flow log ghi 2.717 task xong nhưng results.json kẹt ở 1.372).
-                self.write_error = f"{type(exc).__name__}: {exc}"
-                now_s = time.monotonic()
-                if now_s - self._last_write_warn > 30:
-                    self._last_write_warn = now_s
-                    msg = (f"could not write {self.results_path.name} ({self.write_error}) — "
-                           f"results are in RAM only, free disk space (./clean_logs.sh --apply)")
-                    self.log_line(f"[{self.job_id}] {msg}")
-                    self.emit({"type": "log", "task_id": "*", "line": msg})
-                    try:
-                        print(f"[write-results] {msg}", flush=True)
-                    except Exception:  # noqa: BLE001
-                        pass
+            snapshot = self.snapshot()
+            self._last_checkpoint = now
+        try:
+            temp = self.results_path.with_suffix(".json.tmp")
+            temp.write_text(json.dumps(snapshot, ensure_ascii=False,
+                                       separators=(",", ":")), encoding="utf-8")
+            temp.replace(self.results_path)
+            _write_headline({"job_id": self.job_id, "status": self.status,
+                             "total": self.total, "done": self.done, "ok": self.ok,
+                             "fail": self.fail, "skipped": self.skipped,
+                             "started_at": self.started_at})
+        except OSError as exc:
+            # TRƯỚC ĐÂY: `pass` -> đĩa đầy mà không ai biết, desk chạy tiếp và TOÀN BỘ
+            # kết quả sau checkpoint cuối chỉ nằm trong RAM (đo thật 19/10: job 1de13e494e07
+            # đĩa đầy từ 22:46, flow log ghi 2.717 task xong nhưng results.json kẹt ở 1.372).
+            self.write_error = f"{type(exc).__name__}: {exc}"
+            now_s = time.monotonic()
+            if now_s - self._last_write_warn > 30:
+                self._last_write_warn = now_s
+                msg = (f"could not write {self.results_path.name} ({self.write_error}) — "
+                       f"results are in RAM only, free disk space (./clean_logs.sh --apply)")
+                self.log_line(f"[{self.job_id}] {msg}")
+                self.emit({"type": "log", "task_id": "*", "line": msg})
+                try:
+                    print(f"[write-results] {msg}", flush=True)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def close_log(self) -> None:
         with self._log_lock:
@@ -450,7 +456,10 @@ class Job:
             return self._snapshot_locked()
 
     def _snapshot_locked(self) -> dict:
-        tasks = [deepcopy(self.tasks[tid].to_dict(log_tail=self._log_tail()))
+        # `to_dict()` đã tạo dict mới; chỉ các trường lồng nhau (steps/artifact/egress/logs)
+        # mới cần copy. `deepcopy` toàn bộ task tốn ~0,16 s cho 6.000 task (đo thật) và giữ
+        # job._lock suốt thời gian đó -> worker khác phải chờ, "Running" tụt dưới số worker.
+        tasks = [self.tasks[tid].to_dict(log_tail=self._log_tail(), copy_nested=True)
                  for tid in self.order]
         return {
             "job_id": self.job_id,

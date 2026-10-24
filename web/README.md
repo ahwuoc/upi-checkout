@@ -392,6 +392,16 @@ batch 6.000 token **bắt đầu ngay**, không phải chờ quét cả batch nh
 trong lúc các worker khác đang chạy. UI có tab + ô đếm **Skipped**, card hiện
 “Skipped before run — <lý do>”, Batch picker hiện `⊘ N`.
 
+**Âm thanh khi có link** — công tắc **“Sound on success”** trong *Advanced settings* (mặc định
+bật, nhớ trong `localStorage['upi-notify-sound']`): client phát 2 nốt C6→E6 bằng Web Audio khi
+nhận `task_link` có `link_state=succeeded` (bản vanilla trước dùng `notify.mp3`; Web Audio thì
+0 KB và không phụ thuộc autoplay của file). AudioContext được mở khoá ngay trong cú click **Run**.
+
+**Hiệu năng khi chạy 300 worker** — đo thật: pool giữ đúng **300 running** (3.000 task, sample
+mỗi 0,7 s); cú tụt thoáng qua là do `write_results` cũ giữ `job._lock` trong lúc `json.dumps`
+snapshot (0,16 s snapshot + 0,07 s dumps cho 6.000 task). Đã sửa: `snapshot()` copy nông thay
+`deepcopy` (0,163 s → 0,048 s cho 6.000 task) và serialize/ghi file **ngoài lock**.
+
 **(2) Preview check (tuỳ chọn, không chặn Run).** Nút **Preview check (N)** + ô **Sample**
 (mặc định 200, `0` = tất cả) + **Threads** (2–32) để xem trước tỉ lệ acc đủ điều kiện, rồi bấm
 **Use N** nếu muốn cắt bớt danh sách.
