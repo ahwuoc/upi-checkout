@@ -34,6 +34,7 @@ export interface TaskState {
   artifact?: Artifact | null
   egress?: Record<string, unknown> | null
   skipped_reason?: string
+  expires_at?: number
   link_state?: string
   link_checked_at?: number
   link_flip_at?: number
@@ -168,6 +169,11 @@ export const api = {
     getJson<unknown>(`/api/retry/${jobId}/${taskId}`),
   stats: () => getJson<Record<string, unknown>>('/api/stats/global'),
   run: (payload: RunPayload) => postJson<RunResult>('/api/run', payload),
+  /** Đọc trang instructions để lấy hạn dùng (`expires_at`) — server cache 120 s. */
+  artifact: (url: string, fresh = false) =>
+    getJson<ArtifactProbe>(
+      `/api/artifact?url=${encodeURIComponent(url)}${fresh ? '&fresh=1' : ''}`,
+    ),
   prefilter: (body: { tokens: string; workers: number; proxies?: string | null }) =>
     postJson<{ id: string; total: number; proxies: number }>('/api/prefilter', body),
   prefilterStatus: (id: string) => getJson<PrefilterStatus>(`/api/prefilter/${id}`),
@@ -178,6 +184,19 @@ export const api = {
 /** Ảnh QR / artifact đi qua server để không lộ URL Stripe ra ngoài + có cache. */
 export function artifactUrl(url: string): string {
   return `/api/artifact?url=${encodeURIComponent(url)}`
+}
+
+export interface ArtifactProbe {
+  ok?: boolean
+  error?: string
+  status?: string
+  status_label?: string
+  intent_state?: string
+  kind?: string
+  am?: string
+  fam?: string
+  expires_at?: number
+  seconds_left?: number
 }
 
 export interface PrefilterRow {

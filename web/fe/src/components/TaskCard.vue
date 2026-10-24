@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useNow } from '@/composables/useNow'
 import { ChevronDown, Copy, ExternalLink, QrCode } from '@lucide/vue'
 import { Card, CardContent, CardFooter, CardHeader } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -132,6 +133,24 @@ const egressRows = computed<Array<[string, string]>>(() => {
 })
 
 const hasDetails = computed(() => billingRows.value.length > 0 || egressRows.value.length > 0)
+
+// Countdown hạn dùng trang instructions (chỉ có nghĩa khi còn "waiting"):
+//   chip: "12:34 remaining" · quá hạn: "expired"
+const now = useNow()
+const expiresLeft = computed(() => {
+  const exp = Number(props.task.expires_at || 0)
+  return exp ? exp - now.value : 0
+})
+const showCountdown = computed(
+  () => String(props.task.link_state || '') === 'waiting' && Number(props.task.expires_at || 0) > 0,
+)
+const countdownLabel = computed(() => {
+  const left = expiresLeft.value
+  if (left <= 0) return 'expired'
+  const mm = String(Math.floor(left / 60)).padStart(2, '0')
+  const ss = String(left % 60).padStart(2, '0')
+  return `${mm}:${ss} remaining`
+})
 const detailsOpen = ref(false)
 
 const SKIPPED_LABELS: Record<string, string> = {
@@ -245,6 +264,14 @@ async function copyLink(): Promise<void> {
           :title="chipTooltip || undefined"
         />
         <StatusChip v-if="plus" :chip="plus" :title="String(task.plus_note || '') || undefined" />
+        <span
+          v-if="showCountdown"
+          class="mono inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] tabular-nums"
+          :class="expiresLeft > 0 ? 'border-border text-muted-foreground' : 'border-destructive/40 text-destructive'"
+          :title="`expires ${new Date(Number(task.expires_at) * 1000).toLocaleString()}`"
+        >
+          ⏳ {{ countdownLabel }}
+        </span>
       </div>
 
       <div v-if="steps.length || flowLabel !== '—'" class="mt-1.5">

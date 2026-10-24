@@ -174,12 +174,25 @@ function handleEvent(ev: StreamEvent): void {
       if (taskId) patchTask(taskId, { egress: ev as Record<string, unknown> })
       break
     case 'task_artifact':
-      if (taskId) patchTask(taskId, { artifact: ev.artifact })
+      // Server phát field PHẲNG: {type, task_id, upi_link, qr_png, qr_svg, amount_minor, ...}
+      // (engine: `{"type": "task_artifact", "task_id": ..., **task.artifact}`). Trước đây đọc
+      // `ev.artifact` (undefined) nên QR/link KHÔNG hiện cho tới khi reload lấy snapshot.
+      if (taskId) {
+        const { type: _type, task_id: _taskId, ...fields } = ev as Record<string, unknown>
+        const current = tasks.get(taskId)
+        patchTask(taskId, { artifact: { ...(current?.artifact || {}), ...fields } })
+        if (fields.upi_link) void probeExpiry(taskId, String(fields.upi_link))
+      }
       break
     case 'task_link':
       // Có link vừa chuyển sang trạng thái thành công -> kêu 1 tiếng (như bản vanilla).
       if (String(ev.link_state || '') === 'succeeded') playSuccessSound()
       if (taskId) {
+        // Link vừa sang "waiting" -> lấy hạn dùng để hiện countdown ngay, không đợi vòng quét.
+        if (String(ev.link_state || '') === 'waiting') {
+          const url = String(tasks.get(taskId)?.artifact?.upi_link || '')
+          if (url) void probeExpiry(taskId, url)
+        }
         patchTask(taskId, {
           link_state: ev.link_state,
           link_checked_at: ev.link_checked_at,
@@ -355,7 +368,48 @@ export function setStopping(next: boolean): void {
   stopping.value = next
 }
 
+/** Thời điểm dò `expires_at` gần nhất cho từng task (tránh gọi lặp). */
+const expiryChecked = new Map<string, number>()
+const EXPIRY_REFRESH_SECS = 20
+
+/** Hỏi server hạn dùng trang instructions của 1 link (server cache 120 s). */
+async function probeExpiry(taskId: string, url: string): Promise<void> {
+  const task = tasks.get(taskId)
+  if (!task || !url) return
+  if (String(task.link_state || '') !== 'waiting') return
+  const last = expiryChecked.get(taskId) || 0
+  if (Date.now() / 1000 - last < EXPIRY_REFRESH_SECS) return
+  expiryChecked.set(taskId, Date.now() / 1000)
+  try {
+    const probe = await api.artifact(url)
+    if (probe?.expires_at) patchTask(taskId, { expires_at: probe.expires_at })
+  } catch {
+    /* link chết/proxy lỗi -> lần sau thử lại, không làm hỏng UI */
+  }
+}
+
+/** Quét các link đang "waiting" để lấy hạn dùng (chạy mỗi 10 s, tối đa 12 link/lần). */
+async function refreshExpiries(): Promise<void> {
+  let budget = 12
+  for (const [id, task] of tasks) {
+    if (budget <= 0) break
+    if (String(task.link_state || '') !== 'waiting') continue
+    const url = String(task.artifact?.upi_link || '')
+    if (!url) continue
+    const last = expiryChecked.get(id) || 0
+    if (Date.now() / 1000 - last < EXPIRY_REFRESH_SECS) continue
+    budget -= 1
+    void probeExpiry(id, url)
+  }
+}
+let expiryTimer: ReturnType<typeof setInterval> | null = null
+
 export function useDesk() {
+  if (!expiryTimer) {
+    expiryTimer = setInterval(() => {
+      void refreshExpiries()
+    }, 10_000)
+  }
   return {
     jobs,
     job,

@@ -352,6 +352,17 @@ Nay:
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
+## QR/link hiện ngay (không cần reload) + countdown hạn dùng
+
+* **Bug đã sửa:** server phát event `task_artifact` với các field **phẳng**
+  (`{type, task_id, upi_link, qr_png, qr_svg, amount_minor, …}`), nhưng FE cũ đọc `ev.artifact`
+  → `undefined`, nên QR/link chỉ hiện khi reload (lấy snapshot). Nay merge đúng các field phẳng
+  vào `task.artifact`, nên vừa có link là card hiện QR + payment link ngay.
+* **Countdown:** khi `link_state = waiting`, FE gọi `GET /api/artifact?url=…` để lấy `expires_at`
+  (server cache 120 s) và hiện chip `⏳ mm:ss remaining` (quá hạn → `expired`, màu đỏ). Có một
+  đồng hồ chung 1 giây (`useNow`) thay vì mỗi card một interval. Vòng quét 10 s, tối đa 12 link
+  mỗi lần, mỗi link làm mới tối đa 20 s/lần.
+
 ## Card task hiển thị đủ Billing details + Progress (steps)
 
 Bản vanilla có 2 khối mà bản Vue port thiếu; nay đã thêm lại trong `TaskCard.vue`:
