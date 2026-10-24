@@ -352,6 +352,15 @@ Nay:
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
+## Hiệu ứng khi nhấn nút
+
+Mọi nút (button thường, `Button` của shadcn kể cả khi render ra `<a>`, và `[role=button]`) có
+hiệu ứng nhấn: `transform: scale(0.96)` + `filter: brightness(0.94)`, transition 90 ms; nhả ra
+trở lại bình thường. Tôn trọng `prefers-reduced-motion` (tắt hiệu ứng).
+
+Đo bằng Chromium khi giữ chuột: `transform = matrix(0.96, …)`, `filter = brightness(0.94)`;
+nhả chuột → `transform: none`.
+
 ## Con trỏ chuột trên nút (Tailwind v4)
 
 Tailwind v4 preflight đặt `cursor: default` cho `<button>`, nên các nút copy/mở/lọc không đổi con

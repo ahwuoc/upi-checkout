@@ -132,6 +132,34 @@
     cursor: not-allowed;
   }
 
+  /* Hiệu ứng "đã nhấn" cho mọi nút: nhún nhẹ + tối lại một chút khi giữ chuột.
+     Áp cho button thường, Button của shadcn (data-slot="button", kể cả render ra <a>) và các
+     phần tử role=button. Tôn trọng prefers-reduced-motion. */
+  button,
+  [data-slot="button"],
+  [role="button"] {
+    transition: transform 90ms ease, filter 120ms ease, background-color 150ms ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button:not(:disabled):active,
+  [data-slot="button"]:not([data-disabled]):active,
+  [role="button"]:not([aria-disabled="true"]):active {
+    transform: scale(0.96);
+    filter: brightness(0.94);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    button,
+    [data-slot="button"],
+    [role="button"] {
+      transition: none;
+    }
+    button:not(:disabled):active,
+    [data-slot="button"]:not([data-disabled]):active,
+    [role="button"]:not([aria-disabled="true"]):active {
+      transform: none;
+    }
+  }
+
   code,
   .mono {
     font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
