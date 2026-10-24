@@ -282,6 +282,12 @@ class Job:
         self._proxies: list[str] = []
         self._next_index = len(tokens)
         self._last_checkpoint = 0.0
+        # Checkpoint do MỘT thread nền lo, không phải worker: mỗi lần ghi results.json tốn
+        # 0,1-0,3 s (6.000 task) — nếu worker tự ghi trong finally thì slot của nó bị giữ
+        # trong lúc đang lẽ ra đã nhận task kế tiếp, khiến "Running" tụt dưới số worker
+        # (đo thật: đặt 300 worker nhưng hiện 288).
+        self._checkpoint_due = threading.Event()
+        self._checkpoint_thread: threading.Thread | None = None
         self.state_dir = STATE_DIR / job_id
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self._subs: list[queue.Queue] = []
@@ -392,6 +398,30 @@ class Job:
                 except Exception:  # noqa: BLE001
                     pass
 
+    def request_checkpoint(self) -> None:
+        """Worker xong task -> chỉ bật cờ; thread nền ghi file (không giữ slot worker)."""
+        self._checkpoint_due.set()
+
+    def start_checkpoint_thread(self) -> None:
+        """Thread nền ghi results.json mỗi khi có cờ và đã qua CHECKPOINT_SECS."""
+        if self._checkpoint_thread is not None:
+            return
+
+        def loop() -> None:
+            while True:
+                # Chờ 0,5 s hoặc tới khi có task báo cần ghi (gộp nhiều task một lần ghi).
+                self._checkpoint_due.wait(0.5)
+                if self.status != "running":
+                    self._checkpoint_due.clear()
+                    return
+                if self._checkpoint_due.is_set():
+                    self._checkpoint_due.clear()
+                    self.write_results(checkpoint=True)
+
+        self._checkpoint_thread = threading.Thread(
+            target=loop, name=f"checkpoint-{self.job_id}", daemon=True)
+        self._checkpoint_thread.start()
+
     def close_log(self) -> None:
         with self._log_lock:
             if self._log_fh is not None:
@@ -444,6 +474,16 @@ class Job:
     def fail(self) -> int:
         with self._lock:
             return sum(1 for t in self.tasks.values() if t.status == "fail")
+
+    @property
+    def running(self) -> int:
+        with self._lock:
+            return sum(1 for t in self.tasks.values() if t.status == "running")
+
+    @property
+    def queued(self) -> int:
+        with self._lock:
+            return sum(1 for t in self.tasks.values() if t.status == "pending")
 
     @property
     def skipped(self) -> int:
@@ -2012,7 +2052,7 @@ def _finish_skipped(job: Job, task: Task, verdict: Any, t0: float) -> None:
               "skipped_reason": task.skipped_reason})
     job.emit({"type": "job_progress", "job_id": job.job_id, "done": job.done,
               "ok": job.ok, "fail": job.fail, "skipped": job.skipped,
-              "total": job.total})
+              "running": job.running, "queued": job.queued, "total": job.total})
     job.log_line(f"[{job.job_id}] {task.task_id} skipped by filter: {verdict.verdict} "
                  f"({verdict.detail[:120]})")
 
@@ -2112,7 +2152,8 @@ def _finish(job: Job, task: Task, result: dict, t0: float) -> None:
               "net_out": task.net_out, "net_in": task.net_in,
               "net_requests": task.net_requests})
     job.emit({"type": "job_progress", "job_id": job.job_id, "done": job.done,
-              "ok": job.ok, "fail": job.fail, "total": job.total})
+              "ok": job.ok, "fail": job.fail, "skipped": job.skipped,
+              "running": job.running, "queued": job.queued, "total": job.total})
 
 
 # -------------------------------------------------------------- task running
@@ -2354,7 +2395,7 @@ def _run_task_limited(job: Job, task: Task, proxy_file: Path, proxies: list[str]
             if not job._pending:
                 _complete_job(job)
             else:
-                job.write_results(checkpoint=True)
+                job.request_checkpoint()
 
 
 def _cleanup_job_files(job: Job) -> None:
@@ -2429,6 +2470,7 @@ def _enqueue_tasks(job: Job, tasks: list[Task]) -> None:
         job.emit({"type": "task_init", "task_id": task.task_id, "index": task.index,
                   "email": task.email, "flow": task.flow,
                   "steps": deepcopy(task.steps), "run": task.run})
+    job.start_checkpoint_thread()
     job.write_results(checkpoint=not reopening)
     for task in tasks:
         job._executor.submit(_run_task_limited, job, task, job._proxy_file, job._proxies)

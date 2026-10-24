@@ -28,7 +28,12 @@ const connection = computed(() => {
 })
 
 const cells = computed(() => [
-  { label: 'Running', value: desk.counts.value.running, tone: 'text-foreground' },
+  {
+    label: 'Running',
+    value: desk.counts.value.running,
+    tone: 'text-foreground',
+    suffix: `/${Number(job.value?.workers || 0) || '—'}`,
+  },
   { label: 'Queued', value: desk.counts.value.queued, tone: 'text-chart-3' },
   { label: 'Success', value: desk.counts.value.success, tone: 'text-chart-2' },
   { label: 'Failed', value: desk.counts.value.fail, tone: 'text-destructive' },
@@ -54,7 +59,10 @@ const cells = computed(() => [
       </div>
       <div v-for="cell in cells" :key="cell.label" class="bg-card px-4 py-3">
         <div class="text-xs text-muted-foreground">{{ cell.label }}</div>
-        <div :class="['mt-1 text-2xl font-semibold tabular-nums', cell.tone]">{{ cell.value }}</div>
+        <div :class="['mt-1 flex items-baseline gap-0.5 text-2xl font-semibold tabular-nums', cell.tone]">
+          {{ cell.value }}
+          <span v-if="cell.suffix" class="text-xs font-normal text-muted-foreground">{{ cell.suffix }}</span>
+        </div>
       </div>
       <div class="bg-card px-4 py-3">
         <div class="text-xs text-muted-foreground">Elapsed · throughput</div>

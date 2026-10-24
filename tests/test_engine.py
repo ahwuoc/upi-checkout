@@ -732,5 +732,42 @@ class NetUsageTests(unittest.TestCase):
         self.assertEqual(task.to_dict()["net_in"], 567890)
 
 
+class CheckpointThreadTests(unittest.TestCase):
+    """Checkpoint phải do thread nền ghi, không giữ slot worker.
+
+    Vì sao có test này: trước đây worker tự gọi `write_results(checkpoint=True)` trong
+    `finally`; với job 6.000 task mỗi lần ghi tốn 0,1-0,3 s nên "Running" tụt dưới số worker
+    (đo thật: đặt 300 worker, UI hiện 288). Test khoá lại hành vi: worker chỉ bật cờ, thread
+    nền ghi file.
+    """
+
+    def test_request_checkpoint_writes_results_from_background_thread(self):
+        job = engine.Job("cp0001", "cs", ["tok-1"], "IN", "off", 2, "test", 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            job.results_path = Path(tmp) / "web_cp0001_results.json"
+            job._last_checkpoint = 0.0
+            job.start_checkpoint_thread()
+            job.request_checkpoint()
+            for _ in range(40):
+                if job.results_path.exists():
+                    break
+                time.sleep(0.05)
+            self.assertTrue(job.results_path.exists(), "thread nền phải ghi results.json")
+            data = json.loads(job.results_path.read_text())
+            self.assertEqual(data["job_id"], "cp0001")
+            self.assertEqual(data["total"], 1)
+            job.status = "done"   # để thread nền tự thoát
+            job.close_log()
+
+    def test_checkpoint_is_throttled_by_interval(self):
+        job = engine.Job("cp0002", "cs", ["tok-1"], "IN", "off", 2, "test", 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            job.results_path = Path(tmp) / "web_cp0002_results.json"
+            job._last_checkpoint = time.monotonic()   # vừa ghi xong
+            job.write_results(checkpoint=True)
+            self.assertFalse(job.results_path.exists(), "chưa qua CHECKPOINT_SECS thì chưa ghi")
+            job.close_log()
+
+
 if __name__ == "__main__":
     unittest.main()

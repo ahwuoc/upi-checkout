@@ -64,6 +64,11 @@ function handleEvent(ev: StreamEvent): void {
           done: Number(ev.done ?? job.value.done),
           ok: Number(ev.ok ?? job.value.ok),
           fail: Number(ev.fail ?? job.value.fail),
+          skipped: Number(ev.skipped ?? job.value.skipped ?? 0),
+          // Server gửi kèm running/queued: dùng luôn, khỏi phải suy ra từ Map task (dễ lệch
+          // khi event task_start bị rơi hoặc task ngoài trang chưa có trong Map).
+          running: Number(ev.running ?? job.value.running ?? 0),
+          queued: Number(ev.queued ?? job.value.queued ?? 0),
         }
       }
       break
@@ -76,6 +81,53 @@ function handleEvent(ev: StreamEvent): void {
     case 'job_done':
       stopping.value = false
       void refreshJobs()
+      break
+    case 'task_start':
+      // BẮT BUỘC: nếu bỏ qua event này, task đã chạy nhưng UI vẫn coi là "queued" và số
+      // Running đứng yên ở giá trị của snapshot đầu tiên (đo thật: server 300 running,
+      // UI hiện 162). Đây là lý do "Running không bù vào".
+      if (taskId) {
+        patchTask(taskId, {
+          status: 'running',
+          run: Number(ev.run || 1),
+          flow: (ev.flow as string) || undefined,
+        })
+      }
+      break
+    case 'task_init':
+      if (taskId) {
+        const existing = tasks.get(taskId)
+        if (existing) {
+          Object.assign(existing, {
+            status: 'pending',
+            email: String(ev.email || existing.email || ''),
+            steps: (ev.steps as TaskState['steps']) || existing.steps,
+          })
+        } else {
+          tasks.set(taskId, {
+            task_id: taskId,
+            index: Number(ev.index || 0),
+            email: String(ev.email || ''),
+            status: 'pending',
+            steps: (ev.steps as TaskState['steps']) || [],
+          })
+          order.value = [...order.value, taskId]
+        }
+      }
+      break
+    case 'task_removed':
+      if (taskId) {
+        tasks.delete(taskId)
+        order.value = order.value.filter((id) => id !== taskId)
+      }
+      break
+    case 'tasks_cleared':
+      tasks.clear()
+      order.value = []
+      break
+    case 'resync':
+      // Server báo đã rơi event (hàng đợi SSE đầy) -> lấy lại snapshot để không bị lệch số.
+      void openJob(job.value?.job_id)
       break
     case 'task_done':
       if (taskId) {
@@ -250,6 +302,14 @@ const counts = computed(() => {
     else if (status === 'stopped') base.stopped += 1
     else if (status === 'fail') base.fail += 1
     if (status === 'done' && hasLink(task)) base.success += 1
+  }
+  // running/queued lấy từ server (job.running/job.queued) khi có: số đếm từ Map chỉ đúng cho
+  // những task đã nhận được event, còn server là nguồn chuẩn.
+  const live = job.value
+  if (live) {
+    if (typeof live.running === 'number') base.running = live.running
+    if (typeof live.queued === 'number') base.queued = live.queued
+    if (typeof live.skipped === 'number') base.skipped = live.skipped
   }
   return base
 })

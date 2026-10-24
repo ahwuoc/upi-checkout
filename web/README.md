@@ -352,6 +352,24 @@ Nay:
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
+## Số "Running" trên UI: vì sao lệch và đã sửa gì
+
+Đo trên job thật 6.262 token / 300 worker: server luôn có **300 running** (sample 10 lần), nhưng
+UI hiện **162**. Nguyên nhân **không phải** worker không lấp slot mà là **UI bỏ sót event**:
+
+* `useDesk` chỉ xử lý `task_done`/`step`/`task_link`… mà **không xử lý `task_start`**, nên task
+  đã chạy vẫn bị coi là `queued`; số Running đứng yên ở giá trị của snapshot đầu tiên.
+* Hàng đợi SSE đầy thì server gửi `resync` — trước đây FE bỏ qua luôn event này.
+
+Đã sửa: xử lý `task_start` (→ `running`), `task_init`, `task_removed`, `tasks_cleared`, `resync`
+(lấy lại snapshot), và `job_progress` giờ mang thêm `running`/`queued` để UI dùng **số của
+server** thay vì tự đếm từ Map. Ô Running cũng hiện `300/300` (số worker) để thấy rõ trần.
+
+Đo lại sau khi sửa (cùng job): UI và API khớp **300 = 300** qua 8 lần sample.
+
+Ngoài ra: checkpoint chuyển sang **thread nền** (`Job.start_checkpoint_thread`) — worker chỉ bật
+cờ rồi nhận task kế tiếp, không tự ghi `results.json` (0,1-0,3 s/lần) trong `finally` nữa.
+
 ## Nút Stop: vì sao "trông như không tác dụng" và đã sửa gì
 
 Bấm Stop **vẫn gửi `POST /api/stop/{job}` và server nhận** (`stop_requested=true`), nhưng trước
