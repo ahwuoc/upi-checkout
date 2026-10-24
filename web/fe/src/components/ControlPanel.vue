@@ -29,6 +29,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { api, ApiError, type PrefilterStatus, type RunPayload } from '@/lib/api'
 import { useNotifySound } from '@/composables/useNotifySound'
 import { setStopping, useDesk } from '@/composables/useDesk'
+import { loadTokens, saveTokens } from '@/lib/tokenStore'
 
 const desk = useDesk()
 const sound = useNotifySound()
@@ -60,6 +61,7 @@ const checking = ref(false)
 const prefilter = ref<PrefilterStatus | null>(null)
 const prefilterId = ref('')
 const prefilterError = ref('')
+const storageWarning = ref('')
 const startedAt = ref(0)
 const stopRequested = ref(false)
 let pollTimer: ReturnType<typeof setInterval> | null = null
@@ -100,16 +102,36 @@ function applyKept(): void {
   saveForm()
 }
 
-onMounted(() => {
+onMounted(async () => {
   try {
     const raw = localStorage.getItem(FORM_KEY)
-    if (!raw) return
-    const saved = JSON.parse(raw) as Partial<typeof form>
-    Object.assign(form, saved)
-    // Token luôn được khôi phục: dán AT xong reload vẫn còn (localStorage['upi-tokens']).
-    form.tokens = localStorage.getItem(TOKENS_KEY) || ''
+    if (raw) {
+      const saved = JSON.parse(raw) as Partial<typeof form>
+      Object.assign(form, saved)
+    }
   } catch {
     /* localStorage hỏng/không có -> dùng mặc định */
+  }
+  // Token: ưu tiên IndexedDB (quota lớn, chịu batch vài chục MB); localStorage chỉ là bản cũ.
+  const legacy = (() => {
+    try {
+      return localStorage.getItem(TOKENS_KEY) || ''
+    } catch {
+      return ''
+    }
+  })()
+  let stored = ''
+  try {
+    stored = await loadTokens()
+  } catch {
+    stored = ''
+  }
+  // LUÔN lấy theo IndexedDB (nếu có) — kể cả khi ô đang rỗng sau reload.
+  if (stored) {
+    form.tokens = stored
+  } else if (legacy) {
+    form.tokens = legacy
+    void saveTokens(legacy)   // chuyển bản localStorage cũ sang IndexedDB
   }
 })
 
@@ -136,13 +158,44 @@ async function copyTokens(): Promise<void> {
   }, 1500)
 }
 
+let saveTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Gộp nhiều lần gõ thành 1 lần ghi (300 ms) — tránh serialize cả batch token mỗi ký tự. */
 function saveForm(): void {
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = setTimeout(saveFormNow, 300)
+}
+
+function saveFormNow(): void {
+  // Vì sao phải tách từng key + giải phóng chỗ: localStorage chỉ ~5 MB. Batch 6.000 token
+  // (~2 KB/JWT) đã ~12 MB -> setItem NÉM QuotaExceededError. Trước đây cả hai lần ghi nằm
+  // chung một try nên khi token quá lớn thì **cả cấu hình (proxy, workers…) cũng không được
+  // lưu** — đúng hiện tượng "điền proxy mà reload lại mất".
+  const { tokens, ...rest } = form
+  const payload = JSON.stringify(rest)
+  const formSaved = writeStorage(FORM_KEY, payload)
+  // Token -> IndexedDB (bất đồng bộ, không chặn UI). Xoá bản localStorage cũ nếu còn.
   try {
-    const { tokens, ...rest } = form
-    localStorage.setItem(FORM_KEY, JSON.stringify(rest))
-    localStorage.setItem(TOKENS_KEY, tokens)
+    localStorage.removeItem(TOKENS_KEY)
   } catch {
-    /* chế độ riêng tư */
+    /* ignore */
+  }
+  void saveTokens(tokens).then((ok) => {
+    storageWarning.value = !formSaved
+      ? 'Browser storage is full — settings could not be saved. Clear site data and retry.'
+      : !ok
+        ? 'Could not save tokens in this browser (IndexedDB blocked) — settings are still saved.'
+        : ''
+  })
+}
+
+/** Ghi localStorage, trả false nếu bị chặn/hết chỗ (không ném ra ngoài). */
+function writeStorage(key: string, value: string): boolean {
+  try {
+    localStorage.setItem(key, value)
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -321,6 +374,9 @@ async function stopJob(): Promise<void> {
         placeholder="Paste tokens, one per line (JWT)…"
         @input="saveForm"
       />
+      <p v-if="storageWarning" class="text-[11px] leading-snug text-chart-3">
+        {{ storageWarning }}
+      </p>
     </div>
 
     <div class="grid grid-cols-2 gap-3">

@@ -466,8 +466,10 @@ Nay **giữ nguyên như bản cũ**: tab Success = **mọi task có link** (k�
 * **Copy AT**: nút copy nằm ngay cạnh số lượng token ở header *Access tokens* (icon 📋, cạnh
   `N tokens`) — copy toàn bộ token đang có (đã trim, bỏ dòng trống), xong đổi sang ✓ xanh 1,5 s;
   bị disable khi ô rỗng; không có quyền clipboard thì tự bôi đen text để Ctrl+C.
-* **Token luôn được nhớ** (không còn công tắc): dán AT xong reload vẫn còn, lưu ở
-  `localStorage['upi-tokens']`.
+* **Token lưu trong IndexedDB** (`upi-desk` / store `prefs`, key `tokens`) — vì localStorage chỉ
+  có ~5 MB: batch 6.000 JWT ≈ 12 MB làm `setItem` ném QuotaExceededError, và chính lỗi đó khiến
+  **cả cấu hình (proxy, workers…) không được ghi** → reload mất sạch. IndexedDB chịu được vài
+  chục MB, nên dán 6.000 AT xong reload vẫn còn (đo: 6.083.200 ký tự khôi phục nguyên vẹn).
 * **Toàn bộ cài đặt khác cũng được lưu** trong `localStorage['upi-run-form-v2']`: flow, country,
   workers, runs/account, promo, **proxy list + Use my own proxy list**, mix, proxy filter,
   telemetry, dump, prefilter, Sample, Threads — reload khôi phục đủ (đo bằng Chromium: tokens,
