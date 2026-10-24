@@ -409,9 +409,12 @@ trong lúc các worker khác đang chạy. UI có tab + ô đếm **Skipped**, c
 “Skipped before run — <lý do>”, Batch picker hiện `⊘ N`.
 
 **Âm thanh khi có link** — công tắc **“Sound on success”** trong *Advanced settings* (mặc định
-bật, nhớ trong `localStorage['upi-notify-sound']`): client phát 2 nốt C6→E6 bằng Web Audio khi
-nhận `task_link` có `link_state=succeeded` (bản vanilla trước dùng `notify.mp3`; Web Audio thì
-0 KB và không phụ thuộc autoplay của file). AudioContext được mở khoá ngay trong cú click **Run**.
+bật, nhớ trong `localStorage['upi-notify-sound']`), có nút ▶ để nghe thử. Âm thanh là file thật
+`web/fe/public/sounds/success.mp3` (tiếng thông báo Messenger, 34 KB, 2,0 s) — Vite copy sang
+`dist/sounds/` và FastAPI mount `/sounds`. Client phát file này khi nhận `task_link` có
+`link_state=succeeded`; nếu file lỗi/không tải được thì phát 2 nốt C6→E6 bằng Web Audio để vẫn
+có tín hiệu. Audio được *mở khoá* ngay trong cú click **Run** (và khi bật công tắc) để tránh bị
+chặn autoplay.
 
 **Hiệu năng khi chạy 300 worker** — đo thật: pool giữ đúng **300 running** (3.000 task, sample
 mỗi 0,7 s); cú tụt thoáng qua là do `write_results` cũ giữ `job._lock` trong lúc `json.dumps`

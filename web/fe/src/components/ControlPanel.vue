@@ -408,13 +408,27 @@ async function stopJob(): Promise<void> {
                 <BellOff v-else class="size-3.5 text-muted-foreground" />
                 Sound on success
               </Label>
-              <p class="text-[11px] text-muted-foreground">Chime when a link becomes successful</p>
+              <p class="text-[11px] text-muted-foreground">
+                Messenger sound when a link becomes successful
+              </p>
             </div>
-            <Switch
-              id="sound"
-              :model-value="sound.enabled.value"
-              @update:model-value="sound.setSoundEnabled($event === true)"
-            />
+            <div class="flex items-center gap-1">
+              <Button
+                id="sound-test"
+                variant="ghost"
+                size="icon-xs"
+                title="Play the sound"
+                :disabled="!sound.enabled.value"
+                @click="sound.unlockAudio(); sound.playSuccessSound()"
+              >
+                <Play />
+              </Button>
+              <Switch
+                id="sound"
+                :model-value="sound.enabled.value"
+                @update:model-value="sound.setSoundEnabled($event === true)"
+              />
+            </div>
           </div>
           <div class="flex items-center justify-between gap-2">
             <div>

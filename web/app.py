@@ -154,6 +154,11 @@ def index() -> FileResponse:
 if (FE_DIST / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=str(FE_DIST / "assets")), name="assets")
 
+# File trong `web/fe/public/` (vd `sounds/success.mp3` — tiếng thông báo khi có link) được Vite
+# copy nguyên sang `dist/sounds/`, nên phải mount riêng; nếu không thì trình duyệt nhận 404.
+if (FE_DIST / "sounds").is_dir():
+    app.mount("/sounds", StaticFiles(directory=str(FE_DIST / "sounds")), name="sounds")
+
 
 @app.get("/next")
 def next_index() -> RedirectResponse:
