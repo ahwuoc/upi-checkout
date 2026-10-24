@@ -50,16 +50,21 @@ watch([desk.tab, desk.query], () => {
 })
 const shown = computed(() => desk.visibleTasks.value.slice(0, limit.value))
 
-/** Email của MỌI task trong tab hiện tại (không chỉ 180 card đang vẽ). */
-const tabEmails = computed(() =>
-  desk.visibleTasks.value.map((task) => String(task.email || '')).filter(Boolean),
+/** Email của task ĐÃ TRẢ TIỀN (link_state = succeeded) trong tab hiện tại.
+ *  Vì sao không lấy mọi task có link: tab Success còn chứa card link đã chết (chip "Failed"),
+ *  copy nhầm cả acc fail (đo thật: 5 card nhưng chỉ 4 acc Payment successful). */
+const paidEmails = computed(() =>
+  desk.visibleTasks.value
+    .filter((task) => String(task.link_state || '') === 'succeeded')
+    .map((task) => String(task.email || ''))
+    .filter(Boolean),
 )
 
 /** Copy danh sách email của tab đang xem — ở tab Success là các acc đã Payment successful. */
 async function copyTabEmails(): Promise<void> {
-  const emails = [...new Set(tabEmails.value)]
+  const emails = [...new Set(paidEmails.value)]
   if (!emails.length) {
-    toast.error('No emails in this tab')
+    toast.error('No paid accounts in this tab')
     return
   }
   try {
@@ -101,13 +106,13 @@ const tabs = computed<Array<{ key: TabKey; label: string; count: number }>>(() =
           id="copy-emails"
           variant="outline"
           size="sm"
-          :disabled="!tabEmails.length"
-          :title="`Copy ${tabEmails.length} email(s) in this tab`"
+          :disabled="!paidEmails.length"
+          :title="`Copy ${paidEmails.length} email(s) of PAID accounts (Payment successful) in this tab`"
           @click="copyTabEmails"
         >
           <Copy />
-          Copy emails
-          <span class="text-muted-foreground">{{ tabEmails.length }}</span>
+          Copy paid emails
+          <span class="text-muted-foreground">{{ paidEmails.length }}</span>
         </Button>
         <div class="flex overflow-hidden rounded-md border">
           <Button

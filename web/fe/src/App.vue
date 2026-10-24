@@ -100,6 +100,19 @@ onMounted(() => {
         <TasksPanel />
       </div>
     </main>
-    <Toaster position="bottom-right" :rich-colors="true" :close-button="true" />
+
   </div>
+  <!-- Đặt NGOÀI khối app: Toaster dùng position:fixed, nếu nằm trong phần tử có transform/overflow
+       thì toast bị cắt ở đáy màn hình (đã gặp: toast dài bị kẹt dưới, chỉ thấy 1 dòng). -->
+  <Toaster
+    position="bottom-right"
+    :offset="20"
+    :mobile-offset="12"
+    :gap="8"
+    :visible-toasts="2"
+    :duration="3000"
+    :close-button="true"
+    rich-colors
+    :expand="true"
+  />
 </template>

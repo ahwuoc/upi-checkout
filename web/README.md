@@ -416,10 +416,10 @@ Trước đây tab Success tính mọi task **có link**, nên một task tạo 
 **thất bại** (`link_state = failed`) vẫn nằm trong Success → tab hiện 5 card và nút Copy emails
 copy 5 email, trong khi chỉ 4 acc là Payment successful.
 
-Nay: `isSuccessTask(task) = hasLink(task) && link_state NOT IN (failed, expired, canceled)`;
-link chết được tính vào tab **Failed** (`matchesTab('fail')` = `status === 'fail' || linkDied`).
-`waiting` vẫn nằm trong Success vì vẫn cần QR cho khách quét. Số đếm tab và nút Copy emails dùng
-cùng một hàm nên luôn khớp.
+Nay **giữ nguyên như bản cũ**: tab Success = **mọi task có link** (kể cả link đã chết, hiện chip
+`Failed` để còn nhìn thấy) → 5 card; còn nút **`Copy paid emails 4`** chỉ copy email của acc có
+`link_state = succeeded` (đúng 4 acc Payment successful). Tab Failed chỉ đếm task `status = fail`.
+`waiting` không được copy vì chưa thanh toán.
 
 ## Copy nhanh email
 

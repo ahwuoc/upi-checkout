@@ -111,12 +111,11 @@ export function matchesTab(task: TaskState, tab: TabKey): boolean {
     case 'queued':
       return status === 'pending'
     case 'success':
-      // Task tạo được link nhưng uỷ nhiệm THẤT BẠI thì không tính là success — nếu không,
-      // tab Success (và nút Copy emails) sẽ lẫn acc fail (đo thật: 5 card nhưng chỉ 4 acc
-      // Payment successful).
-      return isSuccessTask(task)
+      // Tab Success = MỌI task tạo được link, kể cả link đã chết: card vẫn hiện chip "Failed"
+      // để còn thấy/nhìn. Việc chỉ-copy-acc-đã-trả-tiền do nút Copy quyết định (xem TasksPanel).
+      return hasLink(task)
     case 'fail':
-      return status === 'fail' || linkDied(task)
+      return status === 'fail'
     case 'skipped':
       return status === 'skipped'
     case 'stopped':

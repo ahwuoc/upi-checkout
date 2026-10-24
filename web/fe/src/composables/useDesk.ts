@@ -13,7 +13,7 @@ import {
   type StreamEvent,
   type TaskState,
 } from '@/lib/api'
-import { isSuccessTask, linkDied, matchesTab, type TabKey } from '@/lib/taskView'
+import { hasLink, matchesTab, type TabKey } from '@/lib/taskView'
 import { playSuccessSound } from '@/composables/useNotifySound'
 
 const jobs = ref<JobSummary[]>([])
@@ -336,8 +336,7 @@ const counts = computed(() => {
     else if (status === 'skipped') base.skipped += 1
     else if (status === 'stopped') base.stopped += 1
     else if (status === 'fail') base.fail += 1
-    if (isSuccessTask(task)) base.success += 1
-    else if (linkDied(task) && status !== 'fail') base.fail += 1
+    if (hasLink(task)) base.success += 1
   }
   // running/queued lấy từ server (job.running/job.queued) khi có: số đếm từ Map chỉ đúng cho
   // những task đã nhận được event, còn server là nguồn chuẩn.

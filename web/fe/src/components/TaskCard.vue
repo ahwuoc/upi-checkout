@@ -230,10 +230,13 @@ async function copyToken(): Promise<void> {
     await navigator.clipboard.writeText(data.token)
     toast.success('AT copied', { description: String(props.task.email || data.task_id), duration: 1800 })
   } catch (exc) {
-    toast.error('Could not copy AT', {
-      description: exc instanceof ApiError ? exc.message : 'token unavailable',
-      duration: 4000,
-    })
+    const raw = exc instanceof ApiError ? exc.message : 'token unavailable'
+    // Câu của server rất dài (giải thích vì sao không lấy được) -> rút gọn cho vừa 1 dòng toast;
+    // nguyên văn vẫn xem được trong tooltip của nút.
+    const short = /desk đã restart|RAM/i.test(raw)
+      ? 'job no longer in RAM (desk restarted) — tokens are never written to disk'
+      : raw.slice(0, 120)
+    toast.error('Could not copy AT', { description: short, duration: 4000 })
   }
 }
 
