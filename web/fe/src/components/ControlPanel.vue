@@ -48,6 +48,8 @@ const form = reactive({
   stripeTelemetry: false,
   dumpTraffic: false,
   prefilter: true,
+  filterLimit: 200,
+  filterWorkers: 16,
 })
 
 const starting = ref(false)
@@ -55,6 +57,8 @@ const checking = ref(false)
 const prefilter = ref<PrefilterStatus | null>(null)
 const prefilterId = ref('')
 const prefilterError = ref('')
+const startedAt = ref(0)
+const stopRequested = ref(false)
 let pollTimer: ReturnType<typeof setInterval> | null = null
 const copied = ref(false)
 let copyTimer: ReturnType<typeof setTimeout> | null = null
@@ -87,8 +91,9 @@ function verdictLabel(verdict: string): string {
 /** Thay ô token bằng đúng những acc vừa được giữ lại. */
 function applyKept(): void {
   const keep = new Set((prefilter.value?.results || []).filter((r) => !r.dropped).map((r) => r.index))
-  const tokens = form.tokens.split('\n').map((line) => line.trim()).filter(Boolean)
-  form.tokens = tokens.filter((_, index) => keep.has(index)).join('\n')
+  const tokens = tokenList(form.tokens)
+  const sample = filterSample.value
+  form.tokens = tokens.filter((_, index) => index >= sample || keep.has(index)).join('\n')
   saveForm()
 }
 
@@ -137,15 +142,52 @@ function saveForm(): void {
   }
 }
 
-/** Gọi prefilter và poll tới khi xong. Trả về danh sách token ĐỦ điều kiện. */
-async function runPrefilter(tokens: string): Promise<string[]> {
+/** Tách token thành mảng đã trim (bỏ dòng trống) — dùng chung cho đếm và lọc. */
+function tokenList(raw: string): string[] {
+  return raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+}
+
+/** Số token thực sự đem đi check: tối đa `form.filterLimit` (0 = check hết). */
+/** Tốc độ check (token/giây) và thời gian còn lại — để biết có nên chờ hay bỏ qua. */
+const speed = computed(() => {
+  const snap = prefilter.value
+  if (!snap || !startedAt.value || !snap.checked) return 0
+  const secs = (Date.now() - startedAt.value) / 1000
+  return secs > 0.5 ? snap.checked / secs : 0
+})
+const eta = computed(() => {
+  const snap = prefilter.value
+  if (!snap || !speed.value) return '—'
+  const left = Math.max(0, snap.total - snap.checked) / speed.value
+  if (left < 60) return `${Math.round(left)}s`
+  return `${Math.round(left / 60)}m`
+})
+
+const filterSample = computed(() => {
+  const all = tokenCount.value
+  const limit = Number(form.filterLimit) || 0
+  return limit > 0 ? Math.min(all, limit) : all
+})
+
+/**
+ * Gọi prefilter (1 GET/token, chỉ `filterSample` token đầu) rồi trả về token ĐỦ điều kiện.
+ * Token nằm ngoài mẫu KHÔNG bị loại — batch lớn vẫn chạy được ngay, không phải chờ check hết.
+ */
+async function runPrefilter(raw: string): Promise<string[]> {
   prefilterError.value = ''
   checking.value = true
   prefilter.value = null
+  startedAt.value = Date.now()
+  const tokens = tokenList(raw)
+  const sample = filterSample.value
+  const head = tokens.slice(0, sample)
   try {
     const started = await api.prefilter({
-      tokens,
-      workers: Math.max(2, Math.min(16, Number(form.workers) || 8)),
+      tokens: head.join('\n'),
+      workers: Math.max(2, Math.min(32, Number(form.filterWorkers) || 16)),
       proxies: form.useProxy ? form.proxies || null : null,
     })
     prefilterId.value = started.id
@@ -153,22 +195,19 @@ async function runPrefilter(tokens: string): Promise<string[]> {
       const snap = await api.prefilterStatus(started.id)
       prefilter.value = snap
       if (snap.state !== 'running') break
-      await new Promise((resolve) => setTimeout(resolve, 700))
+      if (stopRequested.value) {
+        await api.prefilterStop(started.id).catch(() => undefined)
+        stopRequested.value = false
+      }
+      await new Promise((resolve) => setTimeout(resolve, 600))
     }
-    const keep = new Set(
+    const keepHead = new Set(
       (prefilter.value?.results || []).filter((r) => !r.dropped).map((r) => r.index),
     )
-    return tokens
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .filter((_, index) => keep.has(index))
+    return tokens.filter((_, index) => index >= sample || keepHead.has(index))
   } catch (exc) {
     prefilterError.value = exc instanceof ApiError ? exc.message : String(exc)
     return tokens
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
   } finally {
     checking.value = false
     if (pollTimer) {
@@ -385,6 +424,33 @@ async function stopJob(): Promise<void> {
         <Switch id="prefilter" v-model="form.prefilter" @update:model-value="saveForm" />
       </div>
 
+      <div class="grid grid-cols-2 gap-2">
+        <div class="space-y-1">
+          <Label for="filter-limit" class="text-[11px] text-muted-foreground">Sample (0 = all)</Label>
+          <Input
+            id="filter-limit"
+            v-model.number="form.filterLimit"
+            type="number"
+            min="0"
+            :max="tokenCount || 0"
+            class="h-8"
+            @change="saveForm"
+          />
+        </div>
+        <div class="space-y-1">
+          <Label for="filter-workers" class="text-[11px] text-muted-foreground">Threads</Label>
+          <Input
+            id="filter-workers"
+            v-model.number="form.filterWorkers"
+            type="number"
+            min="2"
+            max="32"
+            class="h-8"
+            @change="saveForm"
+          />
+        </div>
+      </div>
+
       <div class="flex items-center gap-2">
         <Button
           id="check-tokens"
@@ -396,10 +462,13 @@ async function stopJob(): Promise<void> {
         >
           <Loader2 v-if="checking" class="animate-spin" />
           <Filter v-else />
-          {{ checking ? 'Checking…' : 'Check tokens' }}
+          {{ checking ? 'Checking…' : `Check ${filterSample || ''} tokens` }}
+        </Button>
+        <Button v-if="checking" size="sm" variant="outline" @click="stopRequested = true">
+          Stop
         </Button>
         <Button
-          v-if="prefilter && prefilter.dropped > 0"
+          v-else-if="prefilter && prefilter.dropped > 0"
           size="sm"
           variant="outline"
           @click="applyKept"
@@ -410,7 +479,12 @@ async function stopJob(): Promise<void> {
 
       <div v-if="prefilter" class="space-y-1">
         <div class="flex items-center justify-between text-[11px] text-muted-foreground">
-          <span>{{ prefilter.checked }}/{{ prefilter.total }} · kept {{ prefilter.kept }}</span>
+          <span>
+            {{ prefilter.checked }}/{{ prefilter.total }} · kept {{ prefilter.kept }}
+            <template v-if="prefilter.state === 'running' && speed > 0">
+              · {{ speed.toFixed(1) }}/s · ETA {{ eta }}
+            </template>
+          </span>
           <span v-if="prefilter.dropped" class="text-destructive">dropped {{ prefilter.dropped }}</span>
         </div>
         <div class="h-1.5 overflow-hidden rounded-full bg-muted">

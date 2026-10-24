@@ -383,9 +383,12 @@ proxy** khi TLS lỗi (proxy đầu SSLError là chuyện thường gặp với 
 
 Dùng:
 
-* Sidebar → công tắc **“Filter tokens before run”** (mặc định bật) + nút **Check tokens**;
-  kết quả hiện `kept N / dropped M` + badge theo lý do, nút **Use N** thay ô token bằng acc đủ
-  điều kiện. Bật công tắc thì bấm **Run** sẽ lọc trước rồi mới chạy; lọc hết sạch thì báo lỗi và
+* Sidebar → công tắc **“Filter tokens before run”** (mặc định bật) + nút **Check N tokens**;
+  kết quả hiện `checked/total · kept N · dropped M` (+ tốc độ `/s` và ETA khi đang chạy) + badge
+  theo lý do, nút **Use N** thay ô token bằng acc đủ điều kiện, nút **Stop** dừng giữa chừng.
+* **Không bắt buộc check hết**: ô **Sample** (mặc định 200, `0` = tất cả) chỉ check N token đầu;
+  token ngoài mẫu **đi thẳng vào batch** (không bị loại). Batch 6.000 token vì vậy vẫn bấm Run
+  được ngay. Ô **Threads** (2–32, mặc định 16) chỉnh số request song song của bước check. Bật công tắc thì bấm **Run** sẽ lọc trước rồi mới chạy; lọc hết sạch thì báo lỗi và
   **không tạo job**.
 * API: `POST /api/prefilter {tokens, workers, proxies}` → `{id}`; poll `GET /api/prefilter/{id}`
   (`checked/kept/dropped/counts/results[]` có `index` để map lại token); `POST /api/prefilter/{id}/stop`.
