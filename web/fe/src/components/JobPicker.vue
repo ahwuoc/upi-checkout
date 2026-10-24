@@ -7,7 +7,7 @@
  *   #id (mono) · 12/100 ✓ 88 ✗ · 22:35 21/10
  */
 import { computed } from 'vue'
-import { Check, ChevronDown, X } from '@lucide/vue'
+import { Ban, Check, ChevronDown, X } from '@lucide/vue'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -59,9 +59,11 @@ function startedLabel(iso?: string): string {
             </span>
             <span
               v-if="skippedCount(current)"
-              class="text-[11px] text-muted-foreground"
+              class="flex items-center gap-0.5 text-[11px] text-muted-foreground"
               title="skipped by token filter"
-            >⊘ {{ skippedCount(current) }}</span>
+            >
+              <Ban class="size-3" />{{ skippedCount(current) }}
+            </span>
           </span>
         </span>
         <span v-else class="text-sm text-muted-foreground">No batch yet</span>
@@ -103,10 +105,10 @@ function startedLabel(iso?: string): string {
               </span>
               <span
                 v-if="skippedCount(j)"
-                class="shrink-0 text-[11px] tabular-nums text-muted-foreground"
+                class="flex shrink-0 items-center gap-0.5 text-[11px] tabular-nums text-muted-foreground"
                 title="skipped by token filter"
               >
-                ⊘ {{ skippedCount(j) }}
+                <Ban class="size-3" />{{ skippedCount(j) }}
               </span>
             </span>
             <span class="text-right text-[11px] tabular-nums whitespace-nowrap text-muted-foreground">

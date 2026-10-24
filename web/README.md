@@ -352,6 +352,15 @@ Nay:
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
+## Icon: dùng bộ lucide (`@lucide/vue`), không dùng emoji
+
+* Countdown: `⏳` → **`Hourglass`** icon của lucide (đổi màu theo trạng thái: bình thường
+  `text-muted-foreground`, quá hạn `text-destructive`).
+* Batch picker: `⊘` → **`Ban`**; mục Advanced settings: `▸/▾` → **`ChevronDown`** xoay 180°;
+  theme ☀/☾ đã là `Sun`/`Moon`; Copy/Open/Check/X/Play đều là icon lucide.
+* Các glyph trạng thái bước (`✓ ◐ ✕ ⊘ ○`) vẫn giữ dạng ký tự cho gọn — chúng là chỉ báo 1 ký tự
+  trong danh sách 10 bước, giống bản vanilla; muốn đổi hết sang SVG thì nói.
+
 ## Card gọn, grid 4 cột (mặc định)
 
 * Grid mặc định **4 cột** (chọn 2–6 vẫn được, nhớ trong `localStorage['upi-grid-cols']`);

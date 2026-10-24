@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useNow } from '@/composables/useNow'
-import { ChevronDown, Copy, ExternalLink, QrCode } from '@lucide/vue'
+import { ChevronDown, Copy, ExternalLink, Hourglass, QrCode } from '@lucide/vue'
 import { Card, CardContent, CardFooter, CardHeader } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -303,7 +303,8 @@ async function copyLink(): Promise<void> {
           :class="expiresLeft > 0 ? 'border-border text-muted-foreground' : 'border-destructive/40 text-destructive'"
           :title="`expires ${new Date(Number(task.expires_at) * 1000).toLocaleString()}`"
         >
-          ⏳ {{ countdownLabel }}
+          <Hourglass class="size-3" />
+          {{ countdownLabel }}
         </span>
       </div>
 

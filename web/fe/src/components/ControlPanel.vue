@@ -6,7 +6,7 @@
  * các cờ thử nghiệm, nút Run/Stop. Toàn bộ giá trị lưu vào localStorage để mở lại không mất.
  */
 import { computed, onMounted, reactive, ref } from 'vue'
-import { Bell, BellOff, Check, Copy, Filter, KeyRound, Loader2, Play, Square } from '@lucide/vue'
+import { Bell, BellOff, Check, ChevronDown, Copy, Filter, KeyRound, Loader2, Play, Square } from '@lucide/vue'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -362,7 +362,7 @@ async function stopJob(): Promise<void> {
       <CollapsibleTrigger as-child>
         <Button variant="ghost" class="w-full justify-between px-3">
           <span>Advanced settings</span>
-          <span class="text-xs text-muted-foreground">{{ advanced ? '▾' : '▸' }}</span>
+          <ChevronDown :class="['size-4 transition-transform', advanced ? 'rotate-180' : '']" />
         </Button>
       </CollapsibleTrigger>
       <CollapsibleContent class="space-y-3 border-t px-3 py-3">
