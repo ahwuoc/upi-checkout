@@ -34,6 +34,7 @@ const desk = useDesk()
 const sound = useNotifySound()
 
 const FORM_KEY = 'upi-run-form'
+const TOKENS_KEY = 'upi-tokens'
 const MAX_WORKERS = 300
 
 const form = reactive({
@@ -52,6 +53,7 @@ const form = reactive({
   prefilter: true,
   filterLimit: 200,
   filterWorkers: 16,
+  rememberTokens: false,
 })
 
 const starting = ref(false)
@@ -105,8 +107,11 @@ onMounted(() => {
     if (!raw) return
     const saved = JSON.parse(raw) as Partial<typeof form>
     Object.assign(form, saved)
-    // Không khôi phục token đã chạy: hạn chế dán lại nhầm cả batch cũ.
-    form.tokens = ''
+    // Token chỉ khôi phục khi người dùng chủ động bật "Remember tokens"; mặc định không lưu
+    // để tránh chạy nhầm batch cũ và tránh token nằm lại trong trình duyệt.
+    const savedTokens = localStorage.getItem(TOKENS_KEY)
+    if (form.rememberTokens && savedTokens) form.tokens = savedTokens
+    else form.tokens = ''
   } catch {
     /* localStorage hỏng/không có -> dùng mặc định */
   }
@@ -137,11 +142,19 @@ async function copyTokens(): Promise<void> {
 
 function saveForm(): void {
   try {
-    const { tokens: _tokens, ...rest } = form
+    const { tokens, ...rest } = form
     localStorage.setItem(FORM_KEY, JSON.stringify(rest))
+    if (form.rememberTokens) localStorage.setItem(TOKENS_KEY, tokens)
+    else localStorage.removeItem(TOKENS_KEY)
   } catch {
     /* chế độ riêng tư */
   }
+}
+
+/** Bật/tắt nhớ token: bật thì lưu ngay, tắt thì xoá khỏi máy. */
+function setRememberTokens(next: boolean): void {
+  form.rememberTokens = next
+  saveForm()
 }
 
 /** Tách token thành mảng đã trim (bỏ dòng trống) — dùng chung cho đếm và lọc. */
@@ -400,6 +413,22 @@ async function stopJob(): Promise<void> {
               <p class="text-[11px] text-muted-foreground">Real muid/guid/sid instead of made-up</p>
             </div>
             <Switch id="telemetry" v-model="form.stripeTelemetry" @update:model-value="saveForm" />
+          </div>
+          <div class="flex items-center justify-between gap-2">
+            <div>
+              <Label for="remember-tokens" class="flex items-center gap-1.5">
+                <KeyRound class="size-3.5 text-muted-foreground" />
+                Remember tokens
+              </Label>
+              <p class="text-[11px] text-muted-foreground">
+                Keep the pasted tokens in this browser (localStorage) — off by default
+              </p>
+            </div>
+            <Switch
+              id="remember-tokens"
+              :model-value="form.rememberTokens"
+              @update:model-value="setRememberTokens($event === true)"
+            />
           </div>
           <div class="flex items-center justify-between gap-2">
             <div>

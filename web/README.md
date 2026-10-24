@@ -391,6 +391,18 @@ Khi một task vừa nhận link/QR (event `task_artifact` có `upi_link` lần 
   đồng hồ chung 1 giây (`useNow`) thay vì mỗi card một interval. Vòng quét 10 s, tối đa 12 link
   mỗi lần, mỗi link làm mới tối đa 20 s/lần.
 
+## Nút Copy AT và việc lưu token
+
+* **Copy AT**: nút copy nằm ngay cạnh số lượng token ở header *Access tokens* (icon 📋, cạnh
+  `N tokens`) — copy toàn bộ token đang có (đã trim, bỏ dòng trống), xong đổi sang ✓ xanh 1,5 s;
+  bị disable khi ô rỗng; không có quyền clipboard thì tự bôi đen text để Ctrl+C.
+* **Token KHÔNG tự lưu** (mặc định): `localStorage` chỉ giữ cấu hình form (flow, country,
+  workers, proxy…) trong `upi-run-form`; token bị bỏ ra ngoài để tránh chạy nhầm batch cũ và
+  tránh để AT nằm lại trong trình duyệt.
+* **Muốn giữ token**: bật **Advanced settings → Remember tokens** (mặc định TẮT). Khi bật,
+  token được lưu ở `localStorage['upi-tokens']` và tự khôi phục sau khi reload; tắt là xoá ngay
+  khỏi máy.
+
 ## Card task hiển thị đủ Billing details + Progress (steps)
 
 Bản vanilla có 2 khối mà bản Vue port thiếu; nay đã thêm lại trong `TaskCard.vue`:
