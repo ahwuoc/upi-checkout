@@ -175,6 +175,19 @@ const chipTooltip = computed(() => {
   return unique.join('\n')
 })
 const status = computed(() => String(props.task.status || 'pending'))
+
+/** Giờ task xong (lúc link được trích ra) — để danh sách đọc theo thứ tự thời gian. */
+const doneClock = computed(() => {
+  const ts = Number(props.task.done_at || 0)
+  if (!ts) return ''
+  const date = new Date(ts * 1000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+})
+const doneTitle = computed(() => {
+  const ts = Number(props.task.done_at || 0)
+  return ts ? `finished ${new Date(ts * 1000).toLocaleString()}` : ''
+})
 const running = computed(() => status.value === 'running')
 
 /** Viền trái theo trạng thái — nhìn nhanh được card nào đang chạy / đã xong. */
@@ -215,6 +228,13 @@ async function copyLink(): Promise<void> {
           {{ String(task.provider || 'UPI').toUpperCase() }}
         </span>
         <span class="shrink-0 text-[11px] text-muted-foreground">₹0.00</span>
+        <span
+          v-if="doneClock"
+          class="mono ml-auto shrink-0 text-[11px] tabular-nums text-muted-foreground"
+          :title="doneTitle"
+        >
+          {{ doneClock }}
+        </span>
       </div>
       <p v-if="reason && status === 'fail'" class="mt-1 truncate text-xs text-destructive" :title="String(task.error || '')">
         {{ reason }}

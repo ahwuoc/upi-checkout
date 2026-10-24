@@ -352,6 +352,13 @@ Nay:
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
+## Thứ tự trong danh sách: theo lúc trích xuất (cũ → mới)
+
+Tab Success/Failed/Skipped/Stopped sắp theo `done_at` **tăng dần** (cái ra trước nằm trên),
+task chưa xong (`done_at` trống) xuống cuối theo `index`; tab Queued/Running giữ thứ tự hàng đợi.
+Mỗi card có thêm **giờ xong `HH:MM:SS`** ở góc phải để đối chiếu thứ tự (tooltip = ngày giờ đầy đủ).
+Trước đó danh sách sắp mới-nhất-lên-đầu nên nhìn không khớp với thời điểm link được tạo.
+
 ## QR/link hiện ngay (không cần reload) + countdown hạn dùng
 
 * **Bug đã sửa:** server phát event `task_artifact` với các field **phẳng**

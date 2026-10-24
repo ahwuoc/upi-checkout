@@ -356,9 +356,18 @@ const visibleTasks = computed<TaskState[]>(() => {
     }
     out.push(task)
   }
-  // Success/Failed xếp task mới xong lên trước cho dễ nhìn.
-  if (tab.value !== 'all' && tab.value !== 'queued') {
-    out.sort((a, b) => Number(b.done_at || 0) - Number(a.done_at || 0))
+  // Thứ tự: cái trích xuất RA SỚM NHẤT nằm trên cùng (đúng thứ tự thời gian), để dễ đối
+  // chiếu với lúc link được tạo. Task chưa xong (không có done_at) nằm cuối, xếp theo index.
+  // Riêng tab queued/running giữ nguyên thứ tự hàng đợi (index) vì chúng chưa "ra" gì cả.
+  if (tab.value !== 'queued' && tab.value !== 'running') {
+    out.sort((a, b) => {
+      const ta = Number(a.done_at || 0)
+      const tb = Number(b.done_at || 0)
+      if (ta && tb && ta !== tb) return ta - tb
+      if (ta && !tb) return -1
+      if (!ta && tb) return 1
+      return Number(a.index || 0) - Number(b.index || 0)
+    })
   }
   return out
 })
