@@ -352,6 +352,18 @@ Nay:
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
+## Con trỏ chuột trên nút (Tailwind v4)
+
+Tailwind v4 preflight đặt `cursor: default` cho `<button>`, nên các nút copy/mở/lọc không đổi con
+trỏ khi hover. Đã thêm vào `style.css`:
+
+```css
+button:not(:disabled), [role="button"]:not([aria-disabled="true"]), a[href], label[for], summary { cursor: pointer; }
+button:disabled, [aria-disabled="true"] { cursor: not-allowed; }
+```
+
+Kiểm: nút copy AT, email trên card, `Copy paid emails`, tab lọc → đều `cursor: pointer`.
+
 ## Icon: dùng bộ lucide (`@lucide/vue`), không dùng emoji
 
 * Countdown: `⏳` → **`Hourglass`** icon của lucide (đổi màu theo trạng thái: bình thường

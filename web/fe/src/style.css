@@ -117,6 +117,21 @@
     margin: 0;
     font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   }
+  /* Tailwind v4 preflight đặt `cursor: default` cho button -> nút copy/mở/lọc không đổi con
+     trỏ khi hover. Trả lại con trỏ bàn tay cho mọi nút bấm được (kể cả button của shadcn). */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  a[href],
+  label[for],
+  summary,
+  [data-sonner-toast] [data-button] {
+    cursor: pointer;
+  }
+  button:disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+
   code,
   .mono {
     font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
