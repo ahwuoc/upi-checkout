@@ -89,6 +89,16 @@ export function hasLink(task: TaskState): boolean {
   return Boolean(task.artifact?.upi_link)
 }
 
+/** Link đã "chết" (khách không trả / hết hạn / huỷ) — task đó phải nằm ở tab Failed. */
+export function linkDied(task: TaskState): boolean {
+  return ['failed', 'expired', 'canceled'].includes(String(task.link_state || ''))
+}
+
+/** Task "thành công" = có link và link CHƯA chết (succeeded, waiting — waiting vẫn cần QR). */
+export function isSuccessTask(task: TaskState): boolean {
+  return hasLink(task) && !linkDied(task)
+}
+
 export type TabKey = 'all' | 'running' | 'queued' | 'success' | 'fail' | 'skipped' | 'stopped'
 
 export function matchesTab(task: TaskState, tab: TabKey): boolean {
@@ -101,9 +111,12 @@ export function matchesTab(task: TaskState, tab: TabKey): boolean {
     case 'queued':
       return status === 'pending'
     case 'success':
-      return status === 'done' && hasLink(task)
+      // Task tạo được link nhưng uỷ nhiệm THẤT BẠI thì không tính là success — nếu không,
+      // tab Success (và nút Copy emails) sẽ lẫn acc fail (đo thật: 5 card nhưng chỉ 4 acc
+      // Payment successful).
+      return isSuccessTask(task)
     case 'fail':
-      return status === 'fail'
+      return status === 'fail' || linkDied(task)
     case 'skipped':
       return status === 'skipped'
     case 'stopped':

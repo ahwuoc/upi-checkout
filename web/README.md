@@ -410,6 +410,17 @@ Token **không** nằm trong snapshot/`results.json` (1 JWT ~2 KB × 6.000 task 
 và token sẽ nằm lại trên đĩa), nên job đã bị desk restart thì endpoint trả 404 kèm lý do
 (“token không lưu ra đĩa”) — UI hiện toast lỗi đúng câu đó.
 
+## Tab Success = link CÒN SỐNG (không tính link đã chết)
+
+Trước đây tab Success tính mọi task **có link**, nên một task tạo được link nhưng uỷ nhiệm
+**thất bại** (`link_state = failed`) vẫn nằm trong Success → tab hiện 5 card và nút Copy emails
+copy 5 email, trong khi chỉ 4 acc là Payment successful.
+
+Nay: `isSuccessTask(task) = hasLink(task) && link_state NOT IN (failed, expired, canceled)`;
+link chết được tính vào tab **Failed** (`matchesTab('fail')` = `status === 'fail' || linkDied`).
+`waiting` vẫn nằm trong Success vì vẫn cần QR cho khách quét. Số đếm tab và nút Copy emails dùng
+cùng một hàm nên luôn khớp.
+
 ## Copy nhanh email
 
 * **Bấm vào email** trên card = copy đúng email đó (toast “Email copied — …”, 1,5 s).
