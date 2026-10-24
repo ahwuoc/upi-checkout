@@ -146,9 +146,12 @@ const expiresLeft = computed(() => {
   const exp = Number(props.task.expires_at || 0)
   return exp ? exp - now.value : 0
 })
-const showCountdown = computed(
-  () => String(props.task.link_state || '') === 'waiting' && Number(props.task.expires_at || 0) > 0,
-)
+const TERMINAL_STATES = ['succeeded', 'failed', 'canceled', 'expired']
+const showCountdown = computed(() => {
+  // Hiện cho cả link chưa xác minh ('') — chip "Link created" vẫn cần đồng hồ hết hạn.
+  const state = String(props.task.link_state || '')
+  return Number(props.task.expires_at || 0) > 0 && !TERMINAL_STATES.includes(state)
+})
 const countdownLabel = computed(() => {
   const left = expiresLeft.value
   if (left <= 0) return 'expired'

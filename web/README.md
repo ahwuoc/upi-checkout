@@ -363,7 +363,8 @@ Nay:
 
 ## Card gọn, grid 4 cột (mặc định)
 
-* Grid mặc định **4 cột** (chọn 2–6 vẫn được, nhớ trong `localStorage['upi-grid-cols']`);
+* Grid mặc định **4 cột** (chọn 2–6 vẫn được, nhớ trong `localStorage['upi-grid-cols-v2']`;
+  key đổi từ `upi-grid-cols` để giá trị cũ — ví dụ đã bấm 2 cột — không áp lại nữa);
   responsive `sm:2 → lg:3 → xl:4`.
 * Card gọn lại: padding `px-2.5 / py-2`, email `text-xs`, QR 96 px, link `text-xs`, khoảng cách
   chip/hàng nhỏ hơn, bỏ số `₹0.00` lặp lại (mọi task đều ₹0), **giờ xong `HH:MM:SS` ghim ở góc
@@ -395,7 +396,8 @@ Khi một task vừa nhận link/QR (event `task_artifact` có `upi_link` lần 
   (`{type, task_id, upi_link, qr_png, qr_svg, amount_minor, …}`), nhưng FE cũ đọc `ev.artifact`
   → `undefined`, nên QR/link chỉ hiện khi reload (lấy snapshot). Nay merge đúng các field phẳng
   vào `task.artifact`, nên vừa có link là card hiện QR + payment link ngay.
-* **Countdown:** khi `link_state = waiting`, FE gọi `GET /api/artifact?url=…` để lấy `expires_at`
+* **Countdown:** khi link còn sống (`waiting` **hoặc chưa xác minh** — chip "Link created"), FE gọi
+  `GET /api/artifact?url=…` để lấy `expires_at`
   (server cache 120 s) và hiện chip `⏳ mm:ss remaining` (quá hạn → `expired`, màu đỏ). Có một
   đồng hồ chung 1 giây (`useNow`) thay vì mỗi card một interval. Vòng quét 10 s, tối đa 12 link
   mỗi lần, mỗi link làm mới tối đa 20 s/lần.

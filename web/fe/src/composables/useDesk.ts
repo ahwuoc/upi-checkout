@@ -195,7 +195,7 @@ function handleEvent(ev: StreamEvent): void {
     case 'task_link':
       if (taskId) {
         // Link vừa sang "waiting" -> lấy hạn dùng để hiện countdown ngay, không đợi vòng quét.
-        if (String(ev.link_state || '') === 'waiting') {
+        if (['', 'waiting'].includes(String(ev.link_state || ''))) {
           const url = String(tasks.get(taskId)?.artifact?.upi_link || '')
           if (url) void probeExpiry(taskId, url)
         }
@@ -419,7 +419,10 @@ const EXPIRY_REFRESH_SECS = 20
 async function probeExpiry(taskId: string, url: string): Promise<void> {
   const task = tasks.get(taskId)
   if (!task || !url) return
-  if (String(task.link_state || '') !== 'waiting') return
+  // Chấp nhận cả link CHƯA xác minh (`link_state` rỗng, chip "Link created"): QR đã dùng được
+  // và trang instructions chỉ sống ~2-3 phút, nên đây chính là lúc cần countdown nhất.
+  const state = String(task.link_state || '')
+  if (!['', 'waiting'].includes(state)) return
   const last = expiryChecked.get(taskId) || 0
   if (Date.now() / 1000 - last < EXPIRY_REFRESH_SECS) return
   expiryChecked.set(taskId, Date.now() / 1000)
@@ -436,7 +439,7 @@ async function refreshExpiries(): Promise<void> {
   let budget = 12
   for (const [id, task] of tasks) {
     if (budget <= 0) break
-    if (String(task.link_state || '') !== 'waiting') continue
+    if (!['', 'waiting'].includes(String(task.link_state || ''))) continue
     const url = String(task.artifact?.upi_link || '')
     if (!url) continue
     const last = expiryChecked.get(id) || 0

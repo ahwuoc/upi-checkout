@@ -17,7 +17,7 @@ const PAGE = 180
 
 // Số cột của grid. Mặc định để CSS responsive lo (2 → 6 cột theo bề rộng); người dùng bấm chọn
 // thì ghi đè bằng `grid-template-columns` (inline style) — Tailwind không hỗ trợ class động.
-const COLS_KEY = 'upi-grid-cols'
+const COLS_KEY = 'upi-grid-cols-v2'
 const colOptions = [2, 3, 4, 5, 6] as const
 const DEFAULT_COLS = 4
 const cols = ref<number>(0)
