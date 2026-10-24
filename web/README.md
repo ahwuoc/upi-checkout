@@ -466,10 +466,12 @@ Nay **giữ nguyên như bản cũ**: tab Success = **mọi task có link** (k�
 * **Copy AT**: nút copy nằm ngay cạnh số lượng token ở header *Access tokens* (icon 📋, cạnh
   `N tokens`) — copy toàn bộ token đang có (đã trim, bỏ dòng trống), xong đổi sang ✓ xanh 1,5 s;
   bị disable khi ô rỗng; không có quyền clipboard thì tự bôi đen text để Ctrl+C.
-* **Token được NHỚ mặc định** (từ bản `upi-run-form-v2`): dán AT xong reload vẫn còn. Lưu ở
-  `localStorage['upi-tokens']`, cấu hình form ở `localStorage['upi-run-form-v2']`.
-* **Tắt**: Advanced settings → **Remember tokens** (mặc định BẬT) → xoá token khỏi máy ngay và
-  reload sẽ rỗng. (Trước đây mặc định TẮT nên mỗi lần reload là mất AT.)
+* **Token luôn được nhớ** (không còn công tắc): dán AT xong reload vẫn còn, lưu ở
+  `localStorage['upi-tokens']`.
+* **Toàn bộ cài đặt khác cũng được lưu** trong `localStorage['upi-run-form-v2']`: flow, country,
+  workers, runs/account, promo, **proxy list + Use my own proxy list**, mix, proxy filter,
+  telemetry, dump, prefilter, Sample, Threads — reload khôi phục đủ (đo bằng Chromium: tokens,
+  workers=123, proxy 2 dòng, mix=true đều còn sau reload).
 
 ## Card task hiển thị đủ Billing details + Progress (steps)
 

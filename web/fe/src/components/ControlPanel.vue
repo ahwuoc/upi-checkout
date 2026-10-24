@@ -53,9 +53,6 @@ const form = reactive({
   prefilter: true,
   filterLimit: 200,
   filterWorkers: 16,
-  // Mặc định BẬT: người dùng muốn dán AT xong reload không bị mất. Tắt được bằng công tắc
-  // trong Advanced settings (khi đó token bị xoá khỏi máy ngay).
-  rememberTokens: true,
 })
 
 const starting = ref(false)
@@ -109,11 +106,8 @@ onMounted(() => {
     if (!raw) return
     const saved = JSON.parse(raw) as Partial<typeof form>
     Object.assign(form, saved)
-    // Token chỉ khôi phục khi người dùng chủ động bật "Remember tokens"; mặc định không lưu
-    // để tránh chạy nhầm batch cũ và tránh token nằm lại trong trình duyệt.
-    const savedTokens = localStorage.getItem(TOKENS_KEY)
-    if (form.rememberTokens && savedTokens) form.tokens = savedTokens
-    else form.tokens = ''
+    // Token luôn được khôi phục: dán AT xong reload vẫn còn (localStorage['upi-tokens']).
+    form.tokens = localStorage.getItem(TOKENS_KEY) || ''
   } catch {
     /* localStorage hỏng/không có -> dùng mặc định */
   }
@@ -146,18 +140,12 @@ function saveForm(): void {
   try {
     const { tokens, ...rest } = form
     localStorage.setItem(FORM_KEY, JSON.stringify(rest))
-    if (form.rememberTokens) localStorage.setItem(TOKENS_KEY, tokens)
-    else localStorage.removeItem(TOKENS_KEY)
+    localStorage.setItem(TOKENS_KEY, tokens)
   } catch {
     /* chế độ riêng tư */
   }
 }
 
-/** Bật/tắt nhớ token: bật thì lưu ngay, tắt thì xoá khỏi máy. */
-function setRememberTokens(next: boolean): void {
-  form.rememberTokens = next
-  saveForm()
-}
 
 /** Tách token thành mảng đã trim (bỏ dòng trống) — dùng chung cho đếm và lọc. */
 function tokenList(raw: string): string[] {
@@ -349,15 +337,29 @@ async function stopJob(): Promise<void> {
       </div>
       <div class="space-y-1.5">
         <Label>Country</Label>
-        <Input v-model="form.country" maxlength="2" class="uppercase" @change="saveForm" />
+        <Input id="country" v-model="form.country" maxlength="2" class="uppercase" @change="saveForm" />
       </div>
       <div class="space-y-1.5">
         <Label>Workers</Label>
-        <Input v-model.number="form.workers" type="number" min="1" :max="MAX_WORKERS" @change="saveForm" />
+        <Input
+          id="workers"
+          v-model.number="form.workers"
+          type="number"
+          min="1"
+          :max="MAX_WORKERS"
+          @change="saveForm"
+        />
       </div>
       <div class="space-y-1.5">
         <Label>Runs / account</Label>
-        <Input v-model.number="form.retries" type="number" min="1" max="5" @change="saveForm" />
+        <Input
+          id="retries"
+          v-model.number="form.retries"
+          type="number"
+          min="1"
+          max="5"
+          @change="saveForm"
+        />
       </div>
     </div>
 
@@ -416,22 +418,6 @@ async function stopJob(): Promise<void> {
               <p class="text-[11px] text-muted-foreground">Real muid/guid/sid instead of made-up</p>
             </div>
             <Switch id="telemetry" v-model="form.stripeTelemetry" @update:model-value="saveForm" />
-          </div>
-          <div class="flex items-center justify-between gap-2">
-            <div>
-              <Label for="remember-tokens" class="flex items-center gap-1.5">
-                <KeyRound class="size-3.5 text-muted-foreground" />
-                Remember tokens
-              </Label>
-              <p class="text-[11px] text-muted-foreground">
-                Keep the pasted tokens in this browser (localStorage) — off by default
-              </p>
-            </div>
-            <Switch
-              id="remember-tokens"
-              :model-value="form.rememberTokens"
-              @update:model-value="setRememberTokens($event === true)"
-            />
           </div>
           <div class="flex items-center justify-between gap-2">
             <div>
