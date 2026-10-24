@@ -400,6 +400,16 @@ Khi một task vừa nhận link/QR (event `task_artifact` có `upi_link` lần 
   đồng hồ chung 1 giây (`useNow`) thay vì mỗi card một interval. Vòng quét 10 s, tối đa 12 link
   mỗi lần, mỗi link làm mới tối đa 20 s/lần.
 
+## Copy AT của từng task
+
+Mỗi card có nút **🔑 `KeyRound`** ở footer (luôn hiện, kể cả khi task lỗi/không có link): bấm là
+copy **access token của chính task đó**, toast “AT copied — email”.
+
+Server: `GET /api/task-token/{job_id}/{task_id}` — đọc token **từ RAM** của job đang sống.
+Token **không** nằm trong snapshot/`results.json` (1 JWT ~2 KB × 6.000 task ≈ 12 MB mỗi snapshot
+và token sẽ nằm lại trên đĩa), nên job đã bị desk restart thì endpoint trả 404 kèm lý do
+(“token không lưu ra đĩa”) — UI hiện toast lỗi đúng câu đó.
+
 ## Copy nhanh email
 
 * **Bấm vào email** trên card = copy đúng email đó (toast “Email copied — …”, 1,5 s).

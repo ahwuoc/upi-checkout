@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useNow } from '@/composables/useNow'
-import { ChevronDown, Copy, ExternalLink, Hourglass, QrCode } from '@lucide/vue'
+import { ChevronDown, Copy, ExternalLink, Hourglass, KeyRound, QrCode } from '@lucide/vue'
+import { api, ApiError } from '@/lib/api'
 import { toast } from 'vue-sonner'
 import { Card, CardContent, CardFooter, CardHeader } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -220,6 +221,22 @@ async function copyEmail(): Promise<void> {
   }
 }
 
+/** Copy AT của task này — server trả từ RAM (token không lưu ra đĩa). */
+async function copyToken(): Promise<void> {
+  const jobId = String(desk.job.value?.job_id || '')
+  if (!jobId) return
+  try {
+    const data = await api.taskToken(jobId, String(props.task.task_id))
+    await navigator.clipboard.writeText(data.token)
+    toast.success('AT copied', { description: String(props.task.email || data.task_id), duration: 1800 })
+  } catch (exc) {
+    toast.error('Could not copy AT', {
+      description: exc instanceof ApiError ? exc.message : 'token unavailable',
+      duration: 4000,
+    })
+  }
+}
+
 async function copyLink(): Promise<void> {
   if (!link.value) return
   try {
@@ -412,11 +429,19 @@ async function copyLink(): Promise<void> {
       </div>
     </CardContent>
 
-    <CardFooter v-if="view === 'grid' && link" class="justify-end gap-0.5 px-2 pt-0 pb-0">
+    <CardFooter v-if="view === 'grid'" class="justify-end gap-0.5 px-2 pt-0 pb-0">
       <TooltipProvider :delay-duration="150">
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon-sm" @click="copyLink">
+            <Button class="copy-at" variant="ghost" size="icon-sm" title="Copy access token (AT)" @click="copyToken">
+              <KeyRound />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Copy access token (AT)</TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger as-child>
+            <Button variant="ghost" size="icon-sm" :disabled="!link" @click="copyLink">
               <Copy />
             </Button>
           </TooltipTrigger>
@@ -424,7 +449,15 @@ async function copyLink(): Promise<void> {
         </Tooltip>
         <Tooltip>
           <TooltipTrigger as-child>
-            <Button variant="ghost" size="icon-sm" as="a" :href="link" target="_blank" rel="noreferrer">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              :disabled="!link"
+              as="a"
+              :href="link || undefined"
+              target="_blank"
+              rel="noreferrer"
+            >
               <ExternalLink />
             </Button>
           </TooltipTrigger>

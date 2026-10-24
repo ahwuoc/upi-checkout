@@ -174,6 +174,9 @@ export const api = {
     getJson<ArtifactProbe>(
       `/api/artifact?url=${encodeURIComponent(url)}${fresh ? '&fresh=1' : ''}`,
     ),
+  /** AT của 1 task (chỉ có khi job còn trong RAM — token không lưu ra đĩa). */
+  taskToken: (jobId: string, taskId: string) =>
+    getJson<{ task_id: string; token: string }>(`/api/task-token/${jobId}/${taskId}`),
   prefilter: (body: { tokens: string; workers: number; proxies?: string | null }) =>
     postJson<{ id: string; total: number; proxies: number }>('/api/prefilter', body),
   prefilterStatus: (id: string) => getJson<PrefilterStatus>(`/api/prefilter/${id}`),

@@ -315,6 +315,28 @@ def api_clear(job_id: str, req: ClearRequest) -> dict:
     return result
 
 
+@app.get("/api/task-token/{job_id}/{task_id}")
+def api_task_token(job_id: str, task_id: str) -> dict:
+    """Trả access token của MỘT task (nút "copy AT" trên card).
+
+    Vì sao không nhét token vào snapshot: token KHÔNG được ghi ra `results.json`/headline (1 JWT
+    ~2 KB × 6.000 task = ~12 MB mỗi snapshot, và token nằm lại trên đĩa). Endpoint này chỉ đọc
+    từ RAM của job đang sống, trả đúng 1 token khi người dùng bấm copy.
+    """
+    job = engine.get_job(job_id)
+    if not job:
+        raise HTTPException(
+            404,
+            "job không còn trong RAM (desk đã restart) — token không lưu ra đĩa nên không lấy lại được",
+        )
+    task = job.tasks.get(task_id)
+    if task is None:
+        raise HTTPException(404, "task does not exist")
+    if not task.token:
+        raise HTTPException(404, "token is empty for this task")
+    return {"task_id": task_id, "token": task.token}
+
+
 @app.post("/api/remove/{job_id}/{task_id}")
 def api_remove(job_id: str, task_id: str) -> dict:
     """Xoá 1 task lẻ (nút ✕ trên từng card). Xoá cả RAM lẫn file đã lưu."""
