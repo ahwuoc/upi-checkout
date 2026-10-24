@@ -417,7 +417,7 @@ Nguyên nhân: **thiếu CSS của `vue-sonner`** (`import 'vue-sonner/style.css
 data-sonner-toaster>` không có `position: fixed`; và component shadcn truyền `:style` (biến CSS)
 sẽ ghi đè style inline của lib. Đã sửa: import CSS trong `main.ts`, bỏ binding `:style` trong
 `Sonner.vue`, chuyển biến CSS sang `style.css` (`[data-sonner-toaster] {…}`).
-Kiểm lại: `position: fixed`, toast nằm trong viewport (bottom 840 / vh 860).
+Kiểm lại: `position: fixed`, toast ở **góc phải TRÊN** (`top: 16px`, trong viewport).
 
 ## Tab Success = link CÒN SỐNG (không tính link đã chết)
 

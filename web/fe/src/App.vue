@@ -105,9 +105,9 @@ onMounted(() => {
   <!-- Đặt NGOÀI khối app: Toaster dùng position:fixed, nếu nằm trong phần tử có transform/overflow
        thì toast bị cắt ở đáy màn hình (đã gặp: toast dài bị kẹt dưới, chỉ thấy 1 dòng). -->
   <Toaster
-    position="bottom-right"
-    :offset="20"
-    :mobile-offset="12"
+    position="top-right"
+    :offset="16"
+    :mobile-offset="10"
     :gap="8"
     :visible-toasts="2"
     :duration="3000"
