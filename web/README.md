@@ -368,6 +368,18 @@ task chưa xong (`done_at` trống) xuống cuối theo `index`; tab Queued/Runn
 Mỗi card có thêm **giờ xong `HH:MM:SS`** ở góc phải để đối chiếu thứ tự (tooltip = ngày giờ đầy đủ).
 Trước đó danh sách sắp mới-nhất-lên-đầu nên nhìn không khớp với thời điểm link được tạo.
 
+## Thông báo khi trích xuất được link (toast + âm thanh + nhãn NEW)
+
+Khi một task vừa nhận link/QR (event `task_artifact` có `upi_link` lần đầu):
+
+* **Toast** (shadcn `sonner`, góc phải dưới): “New link extracted — email · HH:MM:SS” kèm nút
+  **Show** để nhảy thẳng tới card đó (tự chuyển tab Success + cuộn + viền sáng 2,5 s).
+* **Âm thanh**: phát `sounds/success.mp3` **ngay lúc link ra** (trước đây chỉ kêu khi khách đã
+  trả tiền — sai thời điểm). Công tắc *Sound on new link* trong Advanced settings, nút ▶ nghe thử.
+* **Nhãn `NEW`** + viền xanh trên card vừa có link, tự hết sau 20 s.
+* Nếu tab trình duyệt đang ẩn và đã cấp quyền `Notification`, bắn luôn thông báo hệ thống
+  (cùng nội dung, `tag` = task id để không spam trùng).
+
 ## QR/link hiện ngay (không cần reload) + countdown hạn dùng
 
 * **Bug đã sửa:** server phát event `task_artifact` với các field **phẳng**

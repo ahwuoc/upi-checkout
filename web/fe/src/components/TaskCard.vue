@@ -6,8 +6,11 @@ import { Card, CardContent, CardFooter, CardHeader } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import StatusChip from '@/components/StatusChip.vue'
+import { useDesk } from '@/composables/useDesk'
 import type { TaskState } from '@/lib/api'
 import { checkedAge, failReason, linkChip, plusChip } from '@/lib/taskView'
+
+const desk = useDesk()
 
 const props = defineProps<{
   task: TaskState
@@ -153,6 +156,10 @@ const countdownLabel = computed(() => {
 })
 const detailsOpen = ref(false)
 
+// Card "vừa có link" (trong 20 s) -> viền sáng + nhãn NEW để dễ nhận ra khi đang chạy.
+const freshLinks = desk.freshLinks
+const isFresh = computed(() => freshLinks.has(String(props.task.task_id)))
+
 const SKIPPED_LABELS: Record<string, string> = {
   plus_active: 'account already Plus',
   active_sub: 'active subscription',
@@ -212,11 +219,13 @@ async function copyLink(): Promise<void> {
 
 <template>
   <Card
-    :class="
+    :data-task-id="task.task_id"
+    :class="[
       view === 'grid'
         ? `relative gap-1.5 border-l-2 py-2 ${accent}`
-        : `relative flex-row items-center gap-3 border-l-2 py-1.5 ${accent}`
-    "
+        : `relative flex-row items-center gap-3 border-l-2 py-1.5 ${accent}`,
+      isFresh ? 'ring-2 ring-chart-2/70' : '',
+    ]"
   >
     <span
       v-if="doneClock"
@@ -228,6 +237,10 @@ async function copyLink(): Promise<void> {
     <CardHeader :class="view === 'grid' ? 'px-2.5' : 'min-w-0 flex-1 px-2.5'">
       <div class="flex min-w-0 flex-wrap items-center gap-1.5 pr-12">
         <span class="mono shrink-0 text-xs text-muted-foreground">#{{ task.index ?? task.task_id }}</span>
+        <span
+          v-if="isFresh"
+          class="shrink-0 rounded bg-chart-2 px-1 text-[9px] font-semibold tracking-wide text-background uppercase"
+        >new</span>
         <span class="truncate text-xs font-medium" :title="String(task.email || '')">
           {{ task.email || '—' }}
         </span>

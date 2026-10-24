@@ -22,6 +22,9 @@ const tasks = reactive(new Map<string, TaskState>())
 const order = ref<string[]>([])
 const connected = ref(false)
 const stopping = ref(false)
+/** Link vừa trích xuất xong — dùng để bắn toast + làm nổi card (tự xoá sau 20 s). */
+const lastLink = ref<{ taskId: string; email: string; at: number } | null>(null)
+const freshLinks = reactive(new Set<string>())
 const loading = ref(false)
 const error = ref('')
 const tab = ref<TabKey>('all')
@@ -180,13 +183,16 @@ function handleEvent(ev: StreamEvent): void {
       if (taskId) {
         const { type: _type, task_id: _taskId, ...fields } = ev as Record<string, unknown>
         const current = tasks.get(taskId)
+        const hadLink = Boolean(current?.artifact?.upi_link)
         patchTask(taskId, { artifact: { ...(current?.artifact || {}), ...fields } })
-        if (fields.upi_link) void probeExpiry(taskId, String(fields.upi_link))
+        if (fields.upi_link) {
+          void probeExpiry(taskId, String(fields.upi_link))
+          // Link MỚI (chưa từng có) -> toast + nhấp nháy card để người dùng biết ngay.
+          if (!hadLink) markFreshLink(taskId)
+        }
       }
       break
     case 'task_link':
-      // Có link vừa chuyển sang trạng thái thành công -> kêu 1 tiếng (như bản vanilla).
-      if (String(ev.link_state || '') === 'succeeded') playSuccessSound()
       if (taskId) {
         // Link vừa sang "waiting" -> lấy hạn dùng để hiện countdown ngay, không đợi vòng quét.
         if (String(ev.link_state || '') === 'waiting') {
@@ -372,6 +378,34 @@ const visibleTasks = computed<TaskState[]>(() => {
   return out
 })
 
+/** Đánh dấu task vừa có link: toast (qua lastLink) + card nhấp nháy 20 s. */
+function markFreshLink(taskId: string): void {
+  const task = tasks.get(taskId)
+  freshLinks.add(taskId)
+  // KÊU ngay khi link được trích ra (đây mới là lúc cần biết để vào lấy QR), không đợi
+  // tới khi khách quét xong.
+  playSuccessSound()
+  lastLink.value = {
+    taskId,
+    email: String(task?.email || ''),
+    at: Math.floor(Date.now() / 1000),
+  }
+  setTimeout(() => freshLinks.delete(taskId), 20_000)
+}
+
+/** Nhảy tới card của 1 task: mở tab Success, xoá search, cuộn tới và làm nổi bật. */
+async function focusTask(taskId: string): Promise<void> {
+  tab.value = 'success'
+  query.value = ''
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  const el = document.querySelector(`[data-task-id="${taskId}"]`)
+  if (el) {
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    el.classList.add('ring-2', 'ring-chart-2')
+    setTimeout(() => el.classList.remove('ring-2', 'ring-chart-2'), 2500)
+  }
+}
+
 /** ControlPanel gọi ngay sau khi bấm Stop (optimistic) / khi API lỗi để trả lại trạng thái. */
 export function setStopping(next: boolean): void {
   stopping.value = next
@@ -426,6 +460,9 @@ export function useDesk() {
     order,
     connected,
     stopping,
+    lastLink,
+    freshLinks,
+    focusTask,
     loading,
     error,
     tab,

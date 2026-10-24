@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue' 
+import { onMounted, ref, watch } from 'vue' 
 import ControlPanel from '@/components/ControlPanel.vue'
 import DailyChart from '@/components/DailyChart.vue'
 import JobPicker from '@/components/JobPicker.vue'
+import { Toaster } from '@/components/ui/sonner'
+import { toast } from 'vue-sonner'
 import StatsBar from '@/components/StatsBar.vue'
 import TasksPanel from '@/components/TasksPanel.vue'
 import { Moon, Sun } from '@lucide/vue'
@@ -25,6 +27,30 @@ function applyTheme(next: boolean): void {
     /* chế độ riêng tư: không lưu được thì thôi */
   }
 }
+
+// Link mới -> toast (bấm "Show" để nhảy tới card) và thông báo hệ thống nếu tab đang ẩn.
+watch(
+  () => desk.lastLink.value,
+  (link) => {
+    if (!link) return
+    const clock = new Date(link.at * 1000).toLocaleTimeString()
+    toast.success('New link extracted', {
+      description: `${link.email || link.taskId} · ${clock}`,
+      action: { label: 'Show', onClick: () => void desk.focusTask(link.taskId) },
+      duration: 8000,
+    })
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && document.hidden) {
+      try {
+        new Notification('New ₹0 link extracted', {
+          body: `${link.email || link.taskId} · ${clock}`,
+          tag: link.taskId,
+        })
+      } catch {
+        /* trình duyệt chặn notification -> bỏ qua, toast vẫn hiện */
+      }
+    }
+  },
+)
 
 onMounted(() => {
   let saved: string | null = null
@@ -74,5 +100,6 @@ onMounted(() => {
         <TasksPanel />
       </div>
     </main>
+    <Toaster position="bottom-right" :rich-colors="true" :close-button="true" />
   </div>
 </template>

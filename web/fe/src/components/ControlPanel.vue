@@ -406,10 +406,10 @@ async function stopJob(): Promise<void> {
               <Label for="sound" class="flex items-center gap-1.5">
                 <Bell v-if="sound.enabled.value" class="size-3.5 text-muted-foreground" />
                 <BellOff v-else class="size-3.5 text-muted-foreground" />
-                Sound on success
+                Sound on new link
               </Label>
               <p class="text-[11px] text-muted-foreground">
-                Messenger sound when a link becomes successful
+                Messenger sound the moment a ₹0 link/QR is extracted
               </p>
             </div>
             <div class="flex items-center gap-1">
