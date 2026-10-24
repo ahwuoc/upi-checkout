@@ -23,6 +23,9 @@ function okCount(job: { ok?: number }): number {
 function failCount(job: { fail?: number }): number {
   return Number(job.fail || 0)
 }
+function skippedCount(job: { skipped?: number }): number {
+  return Number(job.skipped || 0)
+}
 function totalCount(job: { total?: number }): number {
   return Number(job.total || 0)
 }
@@ -54,6 +57,11 @@ function startedLabel(iso?: string): string {
             <span v-if="failCount(current)" class="flex items-center gap-1 text-destructive">
               <X class="size-3.5" />{{ failCount(current) }}
             </span>
+            <span
+              v-if="skippedCount(current)"
+              class="text-[11px] text-muted-foreground"
+              title="skipped by token filter"
+            >⊘ {{ skippedCount(current) }}</span>
           </span>
         </span>
         <span v-else class="text-sm text-muted-foreground">No batch yet</span>
@@ -92,6 +100,13 @@ function startedLabel(iso?: string): string {
                 class="flex shrink-0 items-center gap-1 text-xs tabular-nums text-destructive"
               >
                 <X class="size-3 shrink-0" />{{ failCount(j) }}
+              </span>
+              <span
+                v-if="skippedCount(j)"
+                class="shrink-0 text-[11px] tabular-nums text-muted-foreground"
+                title="skipped by token filter"
+              >
+                ⊘ {{ skippedCount(j) }}
               </span>
             </span>
             <span class="text-right text-[11px] tabular-nums whitespace-nowrap text-muted-foreground">

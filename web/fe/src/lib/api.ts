@@ -33,6 +33,7 @@ export interface TaskState {
   steps?: Step[]
   artifact?: Artifact | null
   egress?: Record<string, unknown> | null
+  skipped_reason?: string
   link_state?: string
   link_checked_at?: number
   link_flip_at?: number
@@ -67,6 +68,7 @@ export interface JobSnapshot {
   done?: number
   ok?: number
   fail?: number
+  skipped?: number
   running?: number
   queued?: number
   elapsed_ms?: number
@@ -83,6 +85,7 @@ export interface JobSummary {
   done: number
   ok: number
   fail: number
+  skipped?: number
   started_at?: string
 }
 
@@ -129,6 +132,7 @@ export interface RunPayload {
   filter_proxies: boolean
   stripe_telemetry: boolean
   dump_traffic: boolean
+  prefilter: boolean
 }
 
 export interface RunResult {

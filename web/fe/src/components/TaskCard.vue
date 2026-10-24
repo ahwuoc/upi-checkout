@@ -35,6 +35,19 @@ const plus = computed(() => plusChip(props.task, props.jobRunning === true))
 const age = computed(() => checkedAge(props.task.link_checked_at))
 const reason = computed(() => failReason(props.task))
 
+const SKIPPED_LABELS: Record<string, string> = {
+  plus_active: 'account already Plus',
+  active_sub: 'active subscription',
+  banned: 'account banned',
+  token_invalid: 'token invalid (401)',
+  token_expired: 'token expired / revoked',
+  bad_token: 'malformed token',
+  expired: 'token expired',
+}
+const skippedLabel = computed(
+  () => SKIPPED_LABELS[String(props.task.skipped_reason || '')] || 'token filter',
+)
+
 /** Tooltip: gộp note + error, bỏ dòng trùng để không hiện 2 lần cùng một câu. */
 const chipTooltip = computed(() => {
   const parts = [String(props.task.link_note || ''), String(props.task.error || '')]
@@ -85,8 +98,15 @@ async function copyLink(): Promise<void> {
         </span>
         <span class="shrink-0 text-[11px] text-muted-foreground">₹0.00</span>
       </div>
-      <p v-if="reason && status === 'fail'" class="mt-1 truncate text-xs text-fail/90" :title="String(task.error || '')">
+      <p v-if="reason && status === 'fail'" class="mt-1 truncate text-xs text-destructive" :title="String(task.error || '')">
         {{ reason }}
+      </p>
+      <p
+        v-else-if="status === 'skipped'"
+        class="mt-1 truncate text-xs text-muted-foreground"
+        :title="String(task.error || '')"
+      >
+        Skipped before run — {{ skippedLabel }}
       </p>
     </CardHeader>
 

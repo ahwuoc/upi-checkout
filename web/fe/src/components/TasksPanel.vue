@@ -55,6 +55,7 @@ const tabs = computed<Array<{ key: TabKey; label: string; count: number }>>(() =
   { key: 'queued', label: 'Queued', count: desk.counts.value.queued },
   { key: 'success', label: 'Success', count: desk.counts.value.success },
   { key: 'fail', label: 'Failed', count: desk.counts.value.fail },
+  { key: 'skipped', label: 'Skipped', count: desk.counts.value.skipped },
   { key: 'stopped', label: 'Stopped', count: desk.counts.value.stopped },
 ])
 </script>

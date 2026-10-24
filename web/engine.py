@@ -107,9 +107,10 @@ class Task:
     session: str = ""
     provider: str = ""
     steps: list[dict] = field(default_factory=list)
-    status: str = "pending"          # pending | running | done | fail | stopped
+    status: str = "pending"          # pending | running | done | fail | stopped | skipped
     raw_status: str = ""
     error: str | None = None
+    skipped_reason: str = ""         # verdict của bộ lọc khi status == "skipped"
     duration_ms: int | None = None
     run: int = 0
     egress: dict | None = None
@@ -197,6 +198,7 @@ class Task:
             "status": self.status,
             "raw_status": self.raw_status,
             "error": self.error,
+            "skipped_reason": self.skipped_reason,
             "duration_ms": self.duration_ms,
             "run": self.run,
             "egress": self.egress,
@@ -232,7 +234,7 @@ class Job:
     def __init__(self, job_id: str, mode: str, tokens: list[str], country: str,
                  promo: str, workers: int, proxy_source: str, retries: int = 1,
                  filter_proxies: bool = True, stripe_telemetry: bool = False,
-                 dump_traffic: bool = False) -> None:
+                 dump_traffic: bool = False, prefilter: bool = False) -> None:
         self.job_id = job_id
         self.mode = mode
         self.country = country
@@ -249,6 +251,10 @@ class Job:
         # True = ghi MỌI call HTTP (request+response, kèm header) của task vào
         # dumps/<task>/<task>.jsonl dạng HAR entry; xem traffic_dump.py.
         self.dump_traffic = dump_traffic
+        # True = mỗi worker tự check token của mình (1 GET accounts/check) TRƯỚC khi chạy;
+        # acc đã Plus/bị khoá/token chết thì bỏ ngay, không tốn flow. Không chặn ở đầu batch
+        # nên batch 6.000 token vẫn bắt đầu ngay (song song theo số worker).
+        self.prefilter = prefilter
         self.total = len(tokens)
         self.tasks: dict[str, Task] = {}
         self.order: list[str] = []
@@ -360,7 +366,8 @@ class Job:
                 temp.replace(self.results_path)
                 _write_headline({"job_id": self.job_id, "status": self.status,
                                  "total": self.total, "done": self.done, "ok": self.ok,
-                                 "fail": self.fail, "started_at": self.started_at})
+                                 "fail": self.fail, "skipped": self.skipped,
+                                 "started_at": self.started_at})
                 self._last_checkpoint = now
             except OSError as exc:
                 # TRƯỚC ĐÂY: `pass` -> đĩa đầy mà không ai biết, desk chạy tiếp và TOÀN BỘ kết
@@ -432,6 +439,12 @@ class Job:
         with self._lock:
             return sum(1 for t in self.tasks.values() if t.status == "fail")
 
+    @property
+    def skipped(self) -> int:
+        """Task bị bộ lọc loại trước khi chạy (acc Plus/khoá/token chết) — không tính là fail."""
+        with self._lock:
+            return sum(1 for t in self.tasks.values() if t.status == "skipped")
+
     def snapshot(self) -> dict:
         with self._lock:
             return self._snapshot_locked()
@@ -447,7 +460,8 @@ class Job:
             "workers": self.workers,
             "retries": self.retries,
             "total": len(tasks),
-            "done": sum(t["status"] in ("done", "fail", "stopped") for t in tasks),
+            "done": sum(t["status"] in ("done", "fail", "stopped", "skipped") for t in tasks),
+            "skipped": sum(t["status"] == "skipped" for t in tasks),
             "ok": sum(t["status"] == "done" and t["raw_status"] in OK_STATUS for t in tasks),
             "fail": sum(t["status"] == "fail" for t in tasks),
             "running": sum(t["status"] == "running" for t in tasks),
@@ -1142,7 +1156,7 @@ def get_saved_snapshot(job_id: str, *, backfill: bool = True) -> dict | None:
 
 
 HEADLINE_SUFFIX = "_headline.json"
-HEADLINE_KEYS = ("job_id", "status", "total", "done", "ok", "fail", "started_at")
+HEADLINE_KEYS = ("job_id", "status", "total", "done", "ok", "fail", "skipped", "started_at")
 # Snapshot lớn nhất đo được 24 MB; `/api/jobs` cũ parse tới 20 file như vậy MỖI lần gọi
 # (1,67 GB trong logs/) -> >65s, UI hiện "0 job" và "Loading...". Nay đọc headline ~300 byte.
 HEADLINE_MAX_BYTES = 4096
@@ -1963,6 +1977,37 @@ def _verify_link(job: Job, task: Task, result: dict, link: str) -> None:
                       % (job.promo, label))
 
 
+def _finish_skipped(job: Job, task: Task, verdict: Any, t0: float) -> None:
+    """Task bị bộ lọc loại TRƯỚC khi chạy (acc Plus / bị khoá / token chết).
+
+    Trạng thái riêng `skipped` để không làm nhiễu cột Failed và không bị retry: chạy lại
+    cũng vô ích vì lý do nằm ở account/token, không phải lỗi tạm thời.
+    """
+    task.status = "skipped"
+    task.raw_status = "SKIPPED"
+    task.duration_ms = int((time.time() - t0) * 1000)
+    label = str(getattr(verdict, "label", "") or verdict.verdict)
+    task.error = f"prefilter: {label} ({verdict.verdict})"
+    task.skipped_reason = str(verdict.verdict)
+    task.no_retry = True
+    task.no_retry_reason = f"filtered before run: {verdict.verdict}"
+    task.updated_at = _now()
+    task.done_at = int(time.time())
+    for s in task.steps:
+        s["status"] = "skip"
+    job.emit({"type": "step", "task_id": task.task_id, "key": task.steps[0]["key"]
+              if task.steps else "", "status": "skip", "err": task.error})
+    job.emit({"type": "task_done", "task_id": task.task_id, "ok": False,
+              "status": "SKIPPED", "error": task.error, "duration_ms": task.duration_ms,
+              "done_at": task.done_at, "skipped": True,
+              "skipped_reason": task.skipped_reason})
+    job.emit({"type": "job_progress", "job_id": job.job_id, "done": job.done,
+              "ok": job.ok, "fail": job.fail, "skipped": job.skipped,
+              "total": job.total})
+    job.log_line(f"[{job.job_id}] {task.task_id} skipped by filter: {verdict.verdict} "
+                 f"({verdict.detail[:120]})")
+
+
 def _finish(job: Job, task: Task, result: dict, t0: float) -> None:
     task.duration_ms = int((time.time() - t0) * 1000)
     task.raw_status = str(result.get("status") or "UNKNOWN")
@@ -2073,6 +2118,25 @@ def _run_task(job: Job, task: Task, proxy_file: Path, proxies: list[str]) -> boo
         task.updated_at = _now()
         job.emit({"type": "task_start", "task_id": task.task_id, "run": task.run,
                   "flow": task.flow})
+
+    # Bộ lọc token chạy NGAY ĐẦU, trước cả bước lấy proxy: 1 GET accounts/check với proxy
+    # thô trong pool (probe_token tự đổi proxy nếu TLS lỗi). Nhờ vậy acc đã Plus / bị khoá /
+    # token chết bị loại trong ~2-5 giây, không tốn thời gian chấm proxy lẫn flow 5-11 request.
+    if job.prefilter:
+        try:
+            import prefilter as _prefilter  # noqa: PLC0415
+        except ImportError:  # CLI không có web/ trên sys.path
+            _prefilter = None
+        if _prefilter is not None:
+            pool = [p for p in proxies if p]
+            start_at = task.index % len(pool) if pool else 0
+            candidates = ([pool[(start_at + i) % len(pool)] for i in range(min(3, len(pool)))]
+                          if pool else [""])
+            verdict_result = _prefilter.probe_token(task.token, candidates)
+            if verdict_result.verdict in _prefilter.DROP_VERDICTS:
+                with job._lock:
+                    _finish_skipped(job, task, verdict_result, time.time())
+                return False
 
     step, on_log, on_geo = _mk_hooks(job, task)
     # Moi worker tu lay + tu cham proxy cua minh (xem _acquire_proxy): job bat dau
@@ -2387,7 +2451,7 @@ def _require_disk_space(tasks: int) -> None:
 def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: int,
               proxies: str | None, retries: int = 1, mix: bool = False,
               filter_proxies: bool = True, stripe_telemetry: bool = False,
-              dump_traffic: bool = False) -> Job:
+              dump_traffic: bool = False, prefilter: bool = False) -> Job:
     tokens = [t.strip() for t in tokens if t.strip()]
     if not tokens:
         raise ValueError("no tokens")
@@ -2406,7 +2470,7 @@ def start_job(tokens: list[str], mode: str, country: str, promo: str, workers: i
     proxy_file, px, label, quality = _prepare_proxies(job_id, proxies, len(tokens), mix,
                                                       filter_proxies)
     job = Job(job_id, mode, tokens, country, promo, workers, label, retries,
-              filter_proxies, stripe_telemetry, dump_traffic)
+              filter_proxies, stripe_telemetry, dump_traffic, prefilter)
     job._proxy_file, job._proxies = proxy_file, px
 
     with _JOBS_LOCK:

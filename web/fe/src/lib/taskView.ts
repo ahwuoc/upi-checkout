@@ -25,6 +25,7 @@ export function linkChip(task: TaskState): Chip {
     }
     // Chưa có link: chip nói trạng thái TASK (running/fail/queued/stopped), không nói "No link"
     // — vì "No link" mơ hồ, còn "Failed"/"Running" là đúng thứ người xem cần.
+    if (status === 'skipped') return { label: 'Skipped', tone: 'idle' }
     if (status === 'running') return { label: 'Running', tone: 'info' }
     if (status === 'fail') return { label: 'Failed', tone: 'fail' }
     if (status === 'stopped') return { label: 'Stopped', tone: 'idle' }
@@ -88,7 +89,7 @@ export function hasLink(task: TaskState): boolean {
   return Boolean(task.artifact?.upi_link)
 }
 
-export type TabKey = 'all' | 'running' | 'queued' | 'success' | 'fail' | 'stopped'
+export type TabKey = 'all' | 'running' | 'queued' | 'success' | 'fail' | 'skipped' | 'stopped'
 
 export function matchesTab(task: TaskState, tab: TabKey): boolean {
   const status = String(task.status || 'pending')
@@ -103,6 +104,8 @@ export function matchesTab(task: TaskState, tab: TabKey): boolean {
       return status === 'done' && hasLink(task)
     case 'fail':
       return status === 'fail'
+    case 'skipped':
+      return status === 'skipped'
     case 'stopped':
       return status === 'stopped'
     default:

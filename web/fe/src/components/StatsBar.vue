@@ -14,7 +14,9 @@ const percent = computed(() => (total.value ? Math.round((done.value / total.val
 const elapsed = computed(() => fmtDuration(Number(job.value?.elapsed_ms || 0)))
 const throughput = computed(() => {
   const ms = Number(job.value?.elapsed_ms || 0)
-  if (!ms || !done.value) return '—'
+  // Job xong gần như tức thì (toàn bộ token bị bộ lọc loại) -> đừng chia cho ~0 để ra
+  // "60000.0 / min": dưới 1 giây thì không có ý nghĩa thống kê.
+  if (!ms || ms < 1000 || !done.value) return '—'
   return `${((done.value / ms) * 60000).toFixed(1)} / min`
 })
 
@@ -30,6 +32,7 @@ const cells = computed(() => [
   { label: 'Queued', value: desk.counts.value.queued, tone: 'text-chart-3' },
   { label: 'Success', value: desk.counts.value.success, tone: 'text-chart-2' },
   { label: 'Failed', value: desk.counts.value.fail, tone: 'text-destructive' },
+  { label: 'Skipped', value: desk.counts.value.skipped, tone: 'text-muted-foreground' },
 ])
 </script>
 
@@ -43,7 +46,7 @@ const cells = computed(() => [
       </span>
     </div>
 
-    <div class="grid grid-cols-2 gap-px bg-border sm:grid-cols-3 xl:grid-cols-6">
+    <div class="grid grid-cols-2 gap-px bg-border sm:grid-cols-3 xl:grid-cols-7">
       <div class="bg-card px-4 py-3">
         <div class="text-xs text-muted-foreground">Job</div>
         <div class="mono mt-1 truncate text-sm" :title="job?.job_id">{{ job?.job_id || '—' }}</div>

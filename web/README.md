@@ -383,6 +383,19 @@ proxy** khi TLS lỗi (proxy đầu SSLError là chuyện thường gặp với 
 
 Dùng:
 
+### Hai chế độ dùng bộ lọc
+
+**(1) Lọc trong worker — mặc định của nút Run.** Khi bật công tắc, mỗi task tự gọi 1 GET
+`accounts/check` **ngay đầu `_run_task`, trước cả bước chấm/lấy proxy**; acc bị loại được đánh
+dấu `status="skipped"` với lý do (`skipped_reason`) và **không chạy flow, không retry**. Nhờ vậy
+batch 6.000 token **bắt đầu ngay**, không phải chờ quét cả batch như bản trước; chi phí lọc nằm
+trong lúc các worker khác đang chạy. UI có tab + ô đếm **Skipped**, card hiện
+“Skipped before run — <lý do>”, Batch picker hiện `⊘ N`.
+
+**(2) Preview check (tuỳ chọn, không chặn Run).** Nút **Preview check (N)** + ô **Sample**
+(mặc định 200, `0` = tất cả) + **Threads** (2–32) để xem trước tỉ lệ acc đủ điều kiện, rồi bấm
+**Use N** nếu muốn cắt bớt danh sách.
+
 * Sidebar → công tắc **“Filter tokens before run”** (mặc định bật) + nút **Check N tokens**;
   kết quả hiện `checked/total · kept N · dropped M` (+ tốc độ `/s` và ETA khi đang chạy) + badge
   theo lý do, nút **Use N** thay ô token bằng acc đủ điều kiện, nút **Stop** dừng giữa chừng.

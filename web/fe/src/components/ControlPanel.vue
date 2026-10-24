@@ -225,17 +225,8 @@ async function startJob(): Promise<void> {
   }
   starting.value = true
   try {
-    let tokens = form.tokens
-    if (form.prefilter) {
-      const kept = await runPrefilter(tokens)
-      if (!kept.length) {
-        error.value = `Filter dropped all ${tokenCount.value} tokens — nothing eligible to run.`
-        return
-      }
-      tokens = kept.join('\n')
-    }
     const payload: RunPayload = {
-      tokens,
+      tokens: form.tokens,
       mode: form.mode,
       country: form.country.toUpperCase() || 'IN',
       promo: form.promo,
@@ -246,6 +237,9 @@ async function startJob(): Promise<void> {
       filter_proxies: form.filterProxies,
       stripe_telemetry: form.stripeTelemetry,
       dump_traffic: form.dumpTraffic,
+      // Bộ lọc chạy TRONG worker (1 GET/token ngay trước flow của chính acc đó) nên job
+      // bắt đầu ngay, không phải chờ quét cả batch như trước.
+      prefilter: form.prefilter,
     }
     const job = await api.run(payload)
     await desk.refreshJobs()
@@ -418,7 +412,8 @@ async function stopJob(): Promise<void> {
             Filter tokens before run
           </Label>
           <p class="text-[11px] text-muted-foreground">
-            1 GET/token — drops Plus accounts, banned, dead tokens, no promo
+            Each worker checks its own token first (1 GET) — drops Plus, banned, dead tokens
+            before spending a full flow. No upfront wait.
           </p>
         </div>
         <Switch id="prefilter" v-model="form.prefilter" @update:model-value="saveForm" />
@@ -462,7 +457,7 @@ async function stopJob(): Promise<void> {
         >
           <Loader2 v-if="checking" class="animate-spin" />
           <Filter v-else />
-          {{ checking ? 'Checking…' : `Check ${filterSample || ''} tokens` }}
+          {{ checking ? 'Checking…' : `Preview check (${filterSample || 0})` }}
         </Button>
         <Button v-if="checking" size="sm" variant="outline" @click="stopRequested = true">
           Stop

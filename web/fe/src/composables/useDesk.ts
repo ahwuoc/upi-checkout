@@ -5,10 +5,17 @@
  * (`step`, `task_done`, `task_link`…) — patch theo task_id là O(1), không phải dò mảng.
  */
 import { computed, reactive, ref, shallowRef } from 'vue'
-import { api, openStream, type JobSnapshot, type StreamEvent, type TaskState } from '@/lib/api'
+import {
+  api,
+  openStream,
+  type JobSnapshot,
+  type JobSummary,
+  type StreamEvent,
+  type TaskState,
+} from '@/lib/api'
 import { hasLink, matchesTab, type TabKey } from '@/lib/taskView'
 
-const jobs = ref<Array<{ job_id: string; status: string; total: number; done: number; ok: number; fail: number; started_at?: string }>>([])
+const jobs = ref<JobSummary[]>([])
 const job = shallowRef<JobSnapshot | null>(null)
 const tasks = reactive(new Map<string, TaskState>())
 const order = ref<string[]>([])
@@ -63,7 +70,7 @@ function handleEvent(ev: StreamEvent): void {
     case 'task_done':
       if (taskId) {
         patchTask(taskId, {
-          status: ev.ok ? 'done' : 'fail',
+          status: ev.skipped ? 'skipped' : ev.ok ? 'done' : 'fail',
           raw_status: ev.status,
           error: ev.error ?? null,
           duration_ms: ev.duration_ms,
@@ -139,6 +146,7 @@ async function refreshJobs(): Promise<void> {
         done: Number(current.done || 0),
         ok: Number(current.ok || 0),
         fail: Number(current.fail || 0),
+        skipped: Number(current.skipped || 0),
         started_at: current.started_at,
       })
     }
@@ -177,6 +185,7 @@ async function openJob(jobId?: string): Promise<void> {
           done: Number(snapshot.done || 0),
           ok: Number(snapshot.ok || 0),
           fail: Number(snapshot.fail || 0),
+          skipped: Number(snapshot.skipped || 0),
           started_at: snapshot.started_at,
         },
         ...jobs.value,
@@ -219,12 +228,13 @@ async function bootstrap(): Promise<void> {
 }
 
 const counts = computed(() => {
-  const base = { all: 0, running: 0, queued: 0, success: 0, fail: 0, stopped: 0 }
+  const base = { all: 0, running: 0, queued: 0, success: 0, fail: 0, skipped: 0, stopped: 0 }
   for (const task of tasks.values()) {
     base.all += 1
     const status = String(task.status || 'pending')
     if (status === 'running') base.running += 1
     else if (status === 'pending') base.queued += 1
+    else if (status === 'skipped') base.skipped += 1
     else if (status === 'stopped') base.stopped += 1
     else if (status === 'fail') base.fail += 1
     if (status === 'done' && hasLink(task)) base.success += 1
