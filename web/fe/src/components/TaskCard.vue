@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useNow } from '@/composables/useNow'
 import { ChevronDown, Copy, ExternalLink, Hourglass, QrCode } from '@lucide/vue'
+import { toast } from 'vue-sonner'
 import { Card, CardContent, CardFooter, CardHeader } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
@@ -207,6 +208,18 @@ const accent = computed(() => {
   return 'border-l-border'
 })
 
+/** Bấm vào email = copy email đó (thói quen lấy danh sách acc đã thành công). */
+async function copyEmail(): Promise<void> {
+  const email = String(props.task.email || '')
+  if (!email) return
+  try {
+    await navigator.clipboard.writeText(email)
+    toast.success('Email copied', { description: email, duration: 1500 })
+  } catch {
+    toast.error('Could not copy email')
+  }
+}
+
 async function copyLink(): Promise<void> {
   if (!link.value) return
   try {
@@ -241,9 +254,13 @@ async function copyLink(): Promise<void> {
           v-if="isFresh"
           class="shrink-0 rounded bg-chart-2 px-1 text-[9px] font-semibold tracking-wide text-background uppercase"
         >new</span>
-        <span class="truncate text-xs font-medium" :title="String(task.email || '')">
+        <button
+          class="min-w-0 truncate text-left text-xs font-medium hover:underline"
+          :title="`${String(task.email || '')} — click to copy`"
+          @click.stop="copyEmail"
+        >
           {{ task.email || '—' }}
-        </span>
+        </button>
         <span class="shrink-0 rounded border border-border px-1 text-[10px] text-muted-foreground">
           {{ String(task.provider || 'UPI').toUpperCase() }}
         </span>

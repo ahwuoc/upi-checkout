@@ -400,6 +400,14 @@ Khi một task vừa nhận link/QR (event `task_artifact` có `upi_link` lần 
   đồng hồ chung 1 giây (`useNow`) thay vì mỗi card một interval. Vòng quét 10 s, tối đa 12 link
   mỗi lần, mỗi link làm mới tối đa 20 s/lần.
 
+## Copy nhanh email
+
+* **Bấm vào email** trên card = copy đúng email đó (toast “Email copied — …”, 1,5 s).
+* **Nút `Copy emails N`** trên toolbar Tasks = copy **toàn bộ email của tab đang xem** (không chỉ
+  180 card đang vẽ, và đã bỏ trùng). Ở tab **Success** là danh sách acc đã Payment successful;
+  nút hiện số lượng và disabled khi tab rỗng. Kết quả toast: “Copied N emails — <email đầu> …
+  (+N-1)”.
+
 ## Nút Copy AT và việc lưu token
 
 * **Copy AT**: nút copy nằm ngay cạnh số lượng token ở header *Access tokens* (icon 📋, cạnh

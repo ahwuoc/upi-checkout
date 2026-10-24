@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { LayoutGrid, List, Search } from '@lucide/vue'
+import { Copy, LayoutGrid, List, Search } from '@lucide/vue'
+import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -48,6 +49,29 @@ watch([desk.tab, desk.query], () => {
   limit.value = PAGE
 })
 const shown = computed(() => desk.visibleTasks.value.slice(0, limit.value))
+
+/** Email của MỌI task trong tab hiện tại (không chỉ 180 card đang vẽ). */
+const tabEmails = computed(() =>
+  desk.visibleTasks.value.map((task) => String(task.email || '')).filter(Boolean),
+)
+
+/** Copy danh sách email của tab đang xem — ở tab Success là các acc đã Payment successful. */
+async function copyTabEmails(): Promise<void> {
+  const emails = [...new Set(tabEmails.value)]
+  if (!emails.length) {
+    toast.error('No emails in this tab')
+    return
+  }
+  try {
+    await navigator.clipboard.writeText(emails.join('\n'))
+    toast.success(`Copied ${emails.length} email${emails.length === 1 ? '' : 's'}`, {
+      description: emails[0] + (emails.length > 1 ? ` … (+${emails.length - 1})` : ''),
+      duration: 2500,
+    })
+  } catch {
+    toast.error('Could not copy emails')
+  }
+}
 const remaining = computed(() => Math.max(0, desk.visibleTasks.value.length - shown.value.length))
 
 const tabs = computed<Array<{ key: TabKey; label: string; count: number }>>(() => [
@@ -73,6 +97,18 @@ const tabs = computed<Array<{ key: TabKey; label: string; count: number }>>(() =
           <Search class="pointer-events-none absolute top-2 left-2 size-4 text-muted-foreground" />
           <Input v-model="desk.query.value" placeholder="Search email or task ID…" class="w-64 pl-8" />
         </div>
+        <Button
+          id="copy-emails"
+          variant="outline"
+          size="sm"
+          :disabled="!tabEmails.length"
+          :title="`Copy ${tabEmails.length} email(s) in this tab`"
+          @click="copyTabEmails"
+        >
+          <Copy />
+          Copy emails
+          <span class="text-muted-foreground">{{ tabEmails.length }}</span>
+        </Button>
         <div class="flex overflow-hidden rounded-md border">
           <Button
             v-for="n in colOptions"
