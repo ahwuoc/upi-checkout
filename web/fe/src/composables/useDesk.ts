@@ -157,6 +157,22 @@ function handleEvent(ev: StreamEvent): void {
         }
       }
       break
+    case 'task_billing':
+      // Server bắt được hoá đơn flow điền vào PM billing_details -> cập nhật ngay lên card.
+      if (taskId) {
+        const billing = (ev.billing || {}) as Record<string, unknown>
+        patchTask(taskId, {
+          billing_tier: String(billing.billing_tier || ''),
+          billing_check: String(billing.billing_check || ''),
+          billing_name: String(billing.billing_name || ''),
+          billing_city: String(billing.billing_city || ''),
+          billing_pin: String(billing.billing_pin || ''),
+        })
+      }
+      break
+    case 'egress':
+      if (taskId) patchTask(taskId, { egress: ev as Record<string, unknown> })
+      break
     case 'task_artifact':
       if (taskId) patchTask(taskId, { artifact: ev.artifact })
       break

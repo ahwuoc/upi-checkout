@@ -352,6 +352,22 @@ Nay:
 * UI tách nhánh **"Not verified yet"** (chip xám, tooltip = lý do: `unverified … SSLError`) khỏi
   "Link created"/"Awaiting payment".
 
+## Card task hiển thị đủ Billing details + Progress (steps)
+
+Bản vanilla có 2 khối mà bản Vue port thiếu; nay đã thêm lại trong `TaskCard.vue`:
+
+* **Progress / steps** — dòng gọn `FLOW CS · 7/10 · Approve payment` (bước đang chạy hoặc bước
+  lỗi gần nhất); bấm mở ra danh sách đầy đủ 10 bước với ký hiệu `✓ done` `◐ active` `✕ fail`
+  `⊘ skip (Skipped)` `○ pending`, kèm `detail`/`err` (lỗi dài tự xuống dòng).
+* **Billing details** — `Address source` (tier1/tier2/hardcoded-list), `Address check`
+  (ok/fixed/fixed-pin/bad-pin/mismatch-exit), `Billing name`, `Billing city + PIN`, `Exit geo`.
+* **Proxy egress** — `Exit IP (country)`, `Billing IP`, `Billing geo (approx)`, `ISP`,
+  `Proxy verdict · risk`.
+
+Dữ liệu lấy từ snapshot (`steps`, `billing_*`, `geo_*`, `egress`) và cập nhật live qua event
+`step`, `task_billing`, `egress` (trước đây `task_billing` và `egress` bị bỏ qua nên card không
+bao giờ hiện hoá đơn).
+
 ## Số "Running" trên UI: vì sao lệch và đã sửa gì
 
 Đo trên job thật 6.262 token / 300 worker: server luôn có **300 running** (sample 10 lần), nhưng
